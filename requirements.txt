@@ -1,0 +1,7 @@
+pyTelegramBotAPI
+google-genai
+requests
+flask
+pymongo
+dnspython
+deep-translator
