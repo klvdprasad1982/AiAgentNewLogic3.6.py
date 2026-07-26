@@ -318,11 +318,25 @@ def live_research_surveillance_worker():
     print("\n🕵️‍♂️ [START] Live Research Team నిరంతర నిఘా లూప్ ప్రారంభమైంది సర్...")
     
     macro_feeds = [
-        ("RBI_Policy_Macro", "https://news.google.com/rss/search?q=intitle:(%22RBI%22+OR+%22Monetary+Policy%22+OR+%22Repo+Rate%22+OR+%22Inflation%22+OR+%22GDP%22+OR+%22Fiscal+Deficit%22)&hl=en-IN&gl=IN&ceid=IN:en"),
-        ("Global_Fed_Macro", "https://news.google.com/rss/search?q=intitle:(%22Federal+Reserve%22+OR+%22Fed+Rate%22+OR+%22US+Inflation%22+OR+%22Crude+Oil%22+OR+%22OPEC%22+OR+%22Tariffs%22)&hl=en-IN&gl=IN&ceid=IN:en"),
-        ("Sector_Rotation_Trends", "https://news.google.com/rss/search?q=intitle:(%22Sector+Rotation%22+OR+%22Sectoral+Outlook%22+OR+%22PLI+Scheme%22+OR+%22Renewable+Energy+Policy%22+OR+%22Defence+Capex%22)&hl=en-IN&gl=IN&ceid=IN:en"),
-        ("Market_Gurus_Interviews", "https://news.google.com/rss/search?q=site:moneycontrol.com+OR+site:economictimes.indiatimes.com+intitle:(%22Daily+Voice%22+OR+%22Market+Outlook%22+OR+%22Interview%22+OR+%22Big+Picture%22+OR+%22Fund+Manager%22)&hl=en-IN&gl=IN&ceid=IN:en"),
-        ("Big_Corporate_Impact", "https://news.google.com/rss/search?q=site:moneycontrol.com+OR+site:economictimes.indiatimes.com+intitle:(%22Acquisition%22+OR+%22Merger%22+OR+%22Order+Win%22+OR+%22SEBI%22+OR+%22Fraud%22+OR+%22Investigation%22+OR+%22Tax+Raid%22+OR+%22Joint+Venture%22)&hl=en-IN&gl=IN&ceid=IN:en")
+        # ① Macro Economy (India)
+        ("India_Macro_Economy", 
+         "https://news.google.com/rss/search?q=(RBI+OR+%22Reserve+Bank+of+India%22+OR+%22Monetary+Policy+Committee%22+OR+MPC+OR+%22Repo+Rate%22+OR+Inflation+OR+CPI+OR+WPI+OR+GDP+OR+%22Fiscal+Deficit%22+OR+%22Current+Account%22+OR+IIP+OR+PMI+OR+%22Industrial+Production%22+OR+%22Retail+Inflation%22)&hl=en-IN&gl=IN&ceid=IN:en"),
+        
+        # ② Global Markets & Macro
+        ("Global_Markets_Macro", 
+         "https://news.google.com/rss/search?q=(%22Federal+Reserve%22+OR+FOMC+OR+%22Jerome+Powell%22+OR+%22US+Inflation%22+OR+CPI+OR+PCE+OR+%22Nonfarm+Payrolls%22+OR+Unemployment+OR+%22Treasury+Yield%22+OR+%22Dollar+Index%22+OR+DXY+OR+%22Crude+Oil%22+OR+WTI+OR+Brent+OR+OPEC+OR+Tariffs+OR+%22Trade+War%22+OR+%22China+Economy%22+OR+ECB+OR+%22Bank+of+England%22+OR+BOJ+OR+%22US+GDP%22)&hl=en-IN&gl=IN&ceid=IN:en"),
+        
+        # ③ Corporate Actions & Impact
+        ("Corporate_Actions_Impact", 
+         "https://news.google.com/rss/search?q=(Acquisition+OR+Merger+OR+Demerger+OR+Spin-off+OR+IPO+OR+QIP+OR+OFS+OR+%22Rights+Issue%22+OR+%22Order+Win%22+OR+Contract+OR+MoU+OR+%22Joint+Venture%22+OR+%22Strategic+Partnership%22+OR+Expansion+OR+%22Capacity+Expansion%22+OR+Capex+OR+Plant+OR+Factory+OR+SEBI+OR+Fraud+OR+Investigation+OR+%22Income+Tax%22+OR+ED+OR+NCLT+OR+Bankruptcy+OR+Insolvency+OR+Default+OR+%22Credit+Rating%22+OR+Downgrade+OR+Upgrade+OR+%22Promoter+Stake%22+OR+%22Block+Deal%22+OR+%22Bulk+Deal%22)&hl=en-IN&gl=IN&ceid=IN:en"),
+        
+        # ④ Government Policy & Sectors
+        ("Govt_Policy_Sectors", 
+         "https://news.google.com/rss/search?q=(Cabinet+OR+GST+OR+PLI+OR+Defence+OR+Railways+OR+Energy+OR+Telecom+OR+Mining+OR+Export+OR+Import+OR+%22Capital+Expenditure%22+OR+Infrastructure+OR+Renewable+OR+Solar+OR+Wind+OR+Semiconductor+OR+Battery+OR+EV+OR+%22Power+Demand%22+OR+Manufacturing)&hl=en-IN&gl=IN&ceid=IN:en"),
+        
+        # ⑤ Market Views & Research
+        ("Market_Views_Research", 
+         "https://news.google.com/rss/search?q=(site:moneycontrol.com+OR+site:economictimes.indiatimes.com)+(%22Market+Outlook%22+OR+%22Daily+Voice%22+OR+%22Fund+Manager%22+OR+Portfolio+OR+Brokerage+OR+%22Target+Price%22+OR+%22Investment+Strategy%22+OR+Bullish+OR+Bearish+OR+%22Stock+Strategy%22+OR+%22Weekly+Outlook%22)&hl=en-IN&gl=IN&ceid=IN:en")
     ]
     
     while True:
