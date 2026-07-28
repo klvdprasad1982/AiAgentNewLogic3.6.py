@@ -318,18 +318,29 @@ def live_research_surveillance_worker():
     print("\n🕵️‍♂️ [START] Live Research Team నిరంతర నిఘా లూప్ ప్రారంభమైంది సర్...")
     
     macro_feeds = [
-        ("ET_Markets_Global", "https://economictimes.indiatimes.com/markets/rssfeeds/2146842.cms"),
-        # 1.🚀 [FINANCIAL ARTICLES MASTER] మనీకంట్రోల్ లోని బెస్ట్ ఫైనాన్షియల్ ఆర్టికల్స్, ఇన్సైట్స్ మరియు స్పెషల్ నివేదికలన్నీ లాగే మాస్టర్ ఫీడ్ సర్
-        ("Moneycontrol_Insights_Via_Google", "https://news.google.com/rss/search?q=site:moneycontrol.com+(%22Mutual+Funds%22+OR+%22Investment+Strategy%22+OR+%22Market+Outlook%22+OR+%22stocks%22+OR+%22finance%22)&hl=en-IN&gl=IN&ceid=IN:en"),
-        
-        # 2. Indian Macro, RBI, Government Policies & Market Outlook Feed (Full Names)
-        ("India_Macro_Govt_Outlook",
-         "https://news.google.com/rss/search?q=(%22RBI%22+OR+%22Reserve+Bank+of+India%22+OR+%22Monetary+Policy+Committee%22+OR+%22Repo+Rate%22+OR+%22Reverse+Repo%22+OR+%22Cash+Reserve+Ratio%22+OR+%22Statutory+Liquidity+Ratio%22+OR+%22Inflation%22+OR+%22Consumer+Price+Index%22+OR+%22Core+CPI%22+OR+%22Wholesale+Price+Index%22+OR+%22Gross+Domestic+Product%22+OR+%22Fiscal+Deficit%22+OR+%22Current+Account+Deficit%22+OR+%22Index+of+Industrial+Production%22+OR+%22Purchasing+Managers+Index%22+OR+%22Industrial+Production%22+OR+%22Retail+Inflation%22+OR+%22Credit+Growth%22+OR+%22Credit+Card%22+OR+%22Bank+Credit%22+OR+%22Liquidity%22+OR+%22Bond+Yield%22+OR+%22Government+Securities%22+OR+%22G-Sec%22+OR+%22Rupee%22+OR+%22Forex+Reserves%22+OR+%22Foreign+Exchange+Reserves%22+OR+%22Cabinet%22+OR+%22Goods+and+Services+Tax%22+OR+%22GST%22+OR+%22Budget%22+OR+%22Union+Budget%22+OR+%22Production+Linked+Incentive%22+OR+%22PLI%22+OR+%22Fund+Manager%22+OR+%22Weekly+Outlook%22+OR+%22Daily+Voice%22)&hl=en-IN&gl=IN&ceid=IN:en"),
+    # 1. ET Markets Direct Feed
+    ("ET_Markets_Global", "https://economictimes.indiatimes.com/markets/rssfeeds/2146842.cms"),
 
-        # 3. Global Central Banks, US Macro & Commodities Feed (Full Names)
-        ("Global_Macro_Commodities",
-         "https://news.google.com/rss/search?q=(%22Federal+Reserve%22+OR+%22FOMC%22+OR+%22European+Central+Bank%22+OR+%22ECB%22+OR+%22Bank+of+England%22+OR+%22Bank+of+Japan%22+OR+%22BOJ%22+OR+%22Peoples+Bank+of+China%22+OR+%22PBOC%22+OR+%22US+Inflation%22+OR+%22Personal+Consumption+Expenditures%22+OR+%22PCE%22+OR+%22Nonfarm+Payrolls%22+OR+%22Unemployment%22+OR+%22Treasury+Yield%22+OR+%22Dollar+Index%22+OR+%22DXY%22+OR+%22US+GDP%22+OR+%22China+Economy%22+OR+%22Trade+War%22+OR+%22Tariffs%22+OR+%22Recession%22+OR+%22Crude+Oil%22+OR+%22Brent+Crude%22+OR+%22WTI+Crude%22+OR+%22OPEC%22+OR+%22Natural+Gas%22+OR+%22Gold%22+OR+%22Silver%22+OR+%22Copper%22+OR+%22Iron+Ore%22+OR+%22Coal%22+OR+%22Liquefied+Natural+Gas%22+OR+%22LNG%22)&hl=en-IN&gl=IN&ceid=IN:en")
-    ]
+    # 2. Moneycontrol Financial Articles Master Feed
+    ("Moneycontrol_Insights_Via_Google", 
+     "https://news.google.com/rss/search?q=site:moneycontrol.com+intitle:(%22mutual+funds%22+OR+%22investment%22+OR+%22strategy%22+OR+%22market%22+OR+%22stocks%22+OR+%22finance%22+OR+%22outlook%22)&hl=en-IN&gl=IN&ceid=IN:en"),
+
+    # 3. Indian Banking, ARC, Cyber & Credit Feed
+    ("India_Banking_ARC_Cyber",
+     "https://news.google.com/rss/search?q=(%22ARC%22+OR+%22Asset+Reconstruction%22+OR+%22JC+Flowers%22+OR+%22ACRE%22+OR+%22Data+Breach%22+OR+%22Cyber%22+OR+%22NRI+Deposit%22+OR+%22Credit+Growth%22+OR+%22Credit+Card%22+OR+%22Bank+Credit%22+OR+%22Liquidity%22)&hl=en-IN&gl=IN&ceid=IN:en"),
+
+    # 4. Indian Macro, RBI Policies & Economic Outlook Feed
+    ("India_Macro_RBI_Govt",
+     "https://news.google.com/rss/search?q=(%22RBI%22+OR+%22Reserve+Bank+of+India%22+OR+%22Monetary+Policy+Committee%22+OR+%22Repo+Rate%22+OR+%22Reverse+Repo%22+OR+%22Cash+Reserve+Ratio%22+OR+%22Statutory+Liquidity+Ratio%22+OR+%22Inflation%22+OR+%22Consumer+Price+Index%22+OR+%22Core+CPI%22+OR+%22Wholesale+Price+Index%22+OR+%22Gross+Domestic+Product%22+OR+%22Fiscal+Deficit%22+OR+%22Current+Account+Deficit%22+OR+%22Index+of+Industrial+Production%22+OR+%22Purchasing+Managers+Index%22+OR+%22Industrial+Production%22+OR+%22Retail+Inflation%22+OR+%22Bond+Yield%22+OR+%22Government+Securities%22+OR+%22G-Sec%22+OR+%22Rupee%22+OR+%22Forex+Reserves%22+OR+%22Foreign+Exchange+Reserves%22+OR+%22Cabinet%22+OR+%22Goods+and+Services+Tax%22+OR+%22GST%22+OR+%22Budget%22+OR+%22Union+Budget%22+OR+%22Production+Linked+Incentive%22+OR+%22PLI%22+OR+%22Fund+Manager%22+OR+%22Weekly+Outlook%22+OR+%22Daily+Voice%22)&hl=en-IN&gl=IN&ceid=IN:en"),
+
+    # 5. Global Central Banks & Foreign Macro Economy Feed
+    ("Global_Central_Banks_Macro",
+     "https://news.google.com/rss/search?q=(%22Federal+Reserve%22+OR+%22FOMC%22+OR+%22European+Central+Bank%22+OR+%22ECB%22+OR+%22Bank+of+England%22+OR+%22Bank+of+Japan%22+OR+%22BOJ%22+OR+%22Peoples+Bank+of+China%22+OR+%22PBOC%22+OR+%22US+Inflation%22+OR+%22Personal+Consumption+Expenditures%22+OR+%22PCE%22+OR+%22Nonfarm+Payrolls%22+OR+%22Unemployment%22+OR+%22Treasury+Yield%22+OR+%22Dollar+Index%22+OR+%22DXY%22+OR+%22US+GDP%22+OR+%22China+Economy%22+OR+%22Trade+War%22+OR+%22Tariffs%22+OR+%22Recession%22)&hl=en-IN&gl=IN&ceid=IN:en"),
+
+    # 6. Global Commodities & Energy Markets Feed
+    ("Global_Commodities_Energy",
+     "https://news.google.com/rss/search?q=(%22Crude+Oil%22+OR+%22Brent+Crude%22+OR+%22WTI+Crude%22+OR+%22OPEC%22+OR+%22Natural+Gas%22+OR+%22Gold%22+OR+%22Silver%22+OR+%22Copper%22+OR+%22Iron+Ore%22+OR+%22Coal%22+OR+%22Liquefied+Natural+Gas%22+OR+%22LNG%22)&hl=en-IN&gl=IN&ceid=IN:en")
+]
     
     while True:
         try:
