@@ -31,7 +31,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 YOUR_TELEGRAM_CHAT_ID = os.environ.get("YOUR_TELEGRAM_CHAT_ID", "")
 MONGO_URI = os.environ.get("MONGO_URI", "")
 
-GEMINI_API_KEY = os.environ.get("MY_GEMINI_API_KEY_1", "")
+GEMINI_API_KEY = MY_GEMINI_API_KEY_1
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
@@ -53,7 +53,7 @@ except Exception as mongo_init_err:
 
 analysis_vault = {}
 SENT_NEWS_MEMORY = []
-RECENT_EVENT_IDS = {} # Event ID ఆధారంగా టైమ్‌స్టాంప్ దాచే స్మార్ట్ మెమొరీ
+RECENT_EVENT_IDS = {} 
 
 def report_error_to_telegram(error_location, error_msg):
     try:
@@ -80,43 +80,29 @@ def clean_for_html(text):
     text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
     return text
 
-# =====================================================================
-# 🆕 STEP-1: ARTICLE TYPE DETECTION
-# =====================================================================
 def detect_article_type(title):
     title_lower = title.lower()
-    
     if any(k in title_lower for k in [
         'rbi keeps', 'rbi policy', 'repo rate', 'fed cuts', 'fed hikes', 'rate cut', 'rate hike', 
         'monetary policy', 'fomc', 'ecb', 'boj', 'pboc', 'rba', 'interest rate',
         'government approves', 'cabinet clears', 'sebi bans', 'pli scheme', 'qco regime'
     ]):
         return "Policy Decision"
-
     elif any(k in title_lower for k in ['what is', 'what are', 'how do', 'how to', 'why is', 'why are', 'explained', 'explainer', 'guide']):
         return "Explainer"
-    
     elif any(k in title_lower for k in ['interview', 'daily voice', 'fund manager outlook', 'in conversation with', 'speaks to']):
         return "Interview"
-        
     elif any(k in title_lower for k in ['opinion', 'column', 'perspective', 'viewpoint', 'editorial']):
         return "Opinion"
-        
     elif any(k in title_lower for k in ['sources say', 'exclusive', 'deep dive', 'probe', 'study', 'institutional research', 'detailed analysis']):
         return "Research"
-        
     elif any(k in title_lower for k in ['breaking', 'live', 'imposes', 'slaps', 'acquires', 'merger', 'outbreak of war', 'airstrike']):
         return "Breaking"
-        
     else:
         return "Update"
 
-# =====================================================================
-# 🆕 STEP-2: EXPANDED INSTITUTIONAL CATEGORIES
-# =====================================================================
 def classify_news(title):
     title_lower = title.lower()
-    
     if any(k in title_lower for k in ['rbi', 'fed', 'fomc', 'ecb', 'boj', 'repo rate', 'monetary policy', 'policy', 'qco', 'pli scheme']):
         return "Policy & Central Banks"
     elif any(k in title_lower for k in ['gdp', 'inflation', 'cpi', 'ppi', 'fiscal deficit', 'jobs data', 'unemployment']):
@@ -140,13 +126,8 @@ def classify_news(title):
     else:
         return "General Market"
 
-# =====================================================================
-# 🆕 STEP-3: CONTEXT-AWARE EVENT ID & AFFECTED STOCKS ENGINE
-# =====================================================================
 def detect_event_and_impact(title, category, article_type):
     title_lower = title.lower()
-    
-    # 1. Context-Aware Event ID (Article Type ను బట్టి మార్చడం)
     if 'tariff' in title_lower or 'trade' in title_lower:
         event_id = "TRADE_EXPLAINER" if article_type == "Explainer" else ("TRADE_RESEARCH" if article_type == "Research" else "GLOBAL_TRADE_WAR")
     elif 'rbi' in title_lower or 'repo rate' in title_lower:
@@ -170,20 +151,16 @@ def detect_event_and_impact(title, category, article_type):
     impacted_sectors = set()
     impacted_stocks = set()
     
-    # 🎯 2. Multi-Impact + Dynamic Subtypes + Affected Stocks Engine
-    # Trade & Tariffs
     if any(k in title_lower for k in ['tariff', 'trade']):
         impacted_assets.update(['USD/INR', 'DXY', 'Export Index'])
         impacted_sectors.update(['IT', 'Pharma', 'Textiles', 'Auto Component'])
         impacted_stocks.update(['TCS', 'Infosys', 'Sun Pharma', 'Tata Motors', 'Gokaldas Exports'])
 
-    # Crude Oil & Energy
     if any(k in title_lower for k in ['crude', 'oil', 'brent', 'opec']):
         impacted_assets.update(['Brent Crude', 'USD/INR', 'India10Y Yield'])
         impacted_sectors.update(['Paints', 'Aviation', 'OMCs', 'Tyres', 'Chemicals'])
         impacted_stocks.update(['Reliance', 'BPCL', 'HPCL', 'IOC', 'Asian Paints', 'Indigo', 'MRF'])
 
-    # Interest Rates & Central Banks
     if any(k in title_lower for k in ['rbi', 'fed', 'rate', 'repo', 'inflation']):
         if 'cut' in title_lower:
             impacted_assets.update(['Nifty', 'BankNifty (Bullish)', 'Bonds'])
@@ -195,13 +172,11 @@ def detect_event_and_impact(title, category, article_type):
         impacted_sectors.update(['Banking', 'NBFCs', 'Real Estate', 'Auto'])
         impacted_stocks.update(['HDFC Bank', 'SBI', 'ICICI Bank', 'Bajaj Finance', 'DLF', 'Maruti'])
 
-    # Corporate M&A
     if any(k in title_lower for k in ['acquisition', 'merger', 'buyout']):
         impacted_assets.update(['Target Company Share Price'])
         impacted_sectors.update(['Consolidating Sector'])
         impacted_stocks.update(['Acquiring Corp', 'Target Corp'])
 
-    # Defaults
     if not impacted_assets:
         impacted_assets.add('Nifty 50')
     if not impacted_sectors:
@@ -215,41 +190,194 @@ def detect_event_and_impact(title, category, article_type):
     
     return event_id, assets_str, sectors_str, stocks_str
 
-# =====================================================================
-# 🆕 STEP-4: SCORING ENGINE
-# =====================================================================
-def get_market_score(title, article_type):
-    title_lower = title.lower()
-    
-    if article_type == "Policy Decision":
-        return 100
-    elif article_type == "Explainer":
-        return 20
-    elif article_type == "Opinion":
-        return 35
-    elif article_type == "Interview":
-        return 30
-    elif article_type == "Research":
-        return 65
-    elif article_type == "Breaking":
-        return 90
-    
-    score = 50
-    if any(k in title_lower for k in ['tariff', 'war', 'oil surge', 'acquisition', 'rate cut', 'rate hike']):
-        score += 30
-    return min(score, 99)
+SOURCE_CONFIG = {
+    "regulators": {
+        "keywords": ["rbi", "fed", "federal reserve", "sebi", "sec", "imf", "world bank", "ecb", "boj", "boe"],
+        "market": 10, "research": 10
+    },
+    "global_wires": {
+        "keywords": ["reuters", "bloomberg", "wsj", "wall street journal", r"\bft\b", "financial times"],
+        "market": 8, "research": 8
+    },
+    "national_media": {
+        "keywords": ["mint", "livemint", "businessline", "economic times", r"\bet\b", "etmarkets", "cnbc", "guardian", "times of india", "ndtv"],
+        "market": 5, "research": 5
+    },
+    "aggregators": {
+        "keywords": ["moneycontrol"],
+        "market": 3, "research": 3
+    }
+}
 
-def get_research_score(title, article_type):
-    if article_type == "Research":
-        return 95
-    elif article_type == "Explainer":
-        return 80
-    elif article_type == "Interview":
-        return 70
-    elif article_type == "Policy Decision":
-        return 85
+EVENT_WEIGHTS = {
+    "#RBI_MONETARY_POLICY": {"market": 20, "research": 20},
+    "#US_FED_POLICY": {"market": 20, "research": 20},
+    "#GLOBAL_OIL_SHOCK": {"market": 18, "research": 15},
+    "#GLOBAL_TRADE_WAR": {"market": 18, "research": 15},
+    "#CYBER_ATTACK": {"market": 15, "research": 12},
+    "#COMPANY_EARNINGS": {"market": 10, "research": 10}
+}
+
+INDEX_WEIGHTS = {
+    "nifty_heavyweights": {
+        "keywords": ["reliance", "hdfc bank", "tcs", "infosys", "icici bank", "bharti airtel", "itc", "l&t", "sbi", "axis bank", "adani ports"],
+        "market": 10, "research": 6
+    },
+    "midcap_leaders": {
+        "keywords": ["coforge", "inox wind", "suzlon", "persistent", "polycab", "swiggy", "cartrade"],
+        "market": 5, "research": 4
+    }
+}
+
+GEO_SCOPE_WEIGHTS = {
+    "india_direct": {
+        "keywords": ["rbi", "reserve bank", "indian inflation", "cpi india", "rupee", "sebi", "nifty", "sensex"],
+        "market": 15, "research": 15
+    },
+    "global_core": {
+        "keywords": ["fed", "federal reserve", "us inflation", "us cpi", "brent crude", "wti", "us-iran war", "trade war"],
+        "market": 10, "research": 10
+    },
+    "regional_indirect": {
+        "keywords": ["australia inflation", "ecb", "boj", "bank of japan", "bank of england"],
+        "market": 4, "research": 8
+    }
+}
+
+def compress_score(score):
+    if score <= 70:
+        return score
+    return 70 + (score - 70) * 0.6
+
+def calculate_dynamic_scores(title, article_type, category, source=None, event_id=None, debug=False):
+    title_lower = title.lower()
+    source_lower = str(source).lower()
+    category_lower = str(category).lower()
+    
+    m_score = 0
+    r_score = 0
+    reasons = []
+
+    source_matched = False
+    for group, cfg in SOURCE_CONFIG.items():
+        for kw in cfg["keywords"]:
+            pattern = kw if kw.startswith(r"\b") else r"\b" + re.escape(kw) + r"\b"
+            if re.search(pattern, source_lower) or re.search(pattern, title_lower):
+                m_score += cfg["market"]
+                r_score += cfg["research"]
+                reasons.append(f"+{cfg['market']}M/+{cfg['research']}R Source ({group.title()})")
+                source_matched = True
+                break
+        if source_matched:
+            break
+
+    for geo_type, cfg in GEO_SCOPE_WEIGHTS.items():
+        if any(re.search(r'\b' + re.escape(k) + r'\b', title_lower) for k in cfg["keywords"]):
+            m_score += cfg["market"]
+            r_score += cfg["research"]
+            reasons.append(f"+{cfg['market']}M/+{cfg['research']}R Geographic Scope ({geo_type.title()})")
+            break
+
+    for cap_type, cfg in INDEX_WEIGHTS.items():
+        if any(re.search(r'\b' + re.escape(k) + r'\b', title_lower) for k in cfg["keywords"]):
+            m_score += cfg["market"]
+            r_score += cfg["research"]
+            reasons.append(f"+{cfg['market']}M/+{cfg['research']}R Index Weighting ({cap_type.title()})")
+            break
+
+    if 'macro' in category_lower or 'policy' in category_lower:
+        m_score += 12; r_score += 15
+    if 'corporate' in category_lower or 'earnings' in category_lower:
+        m_score += 10; r_score += 8
+    if 'commodities' in category_lower or 'energy' in category_lower:
+        m_score += 8; r_score += 6
+
+    price_action_kws = [
+        'jump', 'jumps', 'jumped', 'rally', 'rallies', 'rallied', 
+        'surge', 'surges', 'surged', 'soars', 'soared', 'hits high',
+        'record high', 'all time high', 'lifetime high', '52-week high', 'hits upper circuit',
+        'plunge', 'plunges', 'plunged', 'crash', 'crashes', 'crashed',
+        'tumble', 'tumbles', 'tumbled', 'slips', 'slides', 'hits low',
+        'record low', '52-week low', 'hits lower circuit'
+    ]
+    
+    if any(re.search(r'\b' + re.escape(k) + r'\b', title_lower) for k in price_action_kws):
+        m_score += 15; r_score += 8
+
+    earnings_kws = ['q1', 'q2', 'q3', 'q4', 'fy26', 'fy27', 'earnings', 'profit', 'pat', 'net profit', 'revenue', 'ebitda', 'margin']
+    if any(re.search(r'\b' + re.escape(k) + r'\b', title_lower) for k in earnings_kws):
+        is_negative = any(k in title_lower for k in ['falls', 'drops', 'slides', 'declines', 'misses', 'down', 'loss', 'slips'])
+        is_positive = any(k in title_lower for k in ['surges', 'rises', 'jumps', 'soars', 'doubles', 'up', 'grows'])
+        
+        if is_negative:
+            m_score += 22; r_score += 10
+        elif is_positive:
+            m_score += 22; r_score += 18
+        else:
+            m_score += 12; r_score += 10
+
+    shock_kws = ['bankruptcy', 'default', 'fraud', 'investigation', 'downgrade', 'guidance cut', 'sebi notice', 'nclt', 'insolvency', 'scam', 'penalty', 'investigates']
+    if any(re.search(r'\b' + re.escape(k) + r'\b', title_lower) for k in shock_kws):
+        m_score += 28; r_score += 18
+
+    macro_kws = ['rbi', 'fed', 'federal reserve', 'ecb', 'boe', 'boj', 'monetary policy', 'fomc', 'repo rate', 'cpi', 'wpi', 'inflation', 'gdp', 'crude oil', 'oil war', 'war']
+    if any(re.search(r'\b' + re.escape(k) + r'\b', title_lower) for k in macro_kws):
+        m_score += 20; r_score += 15
+
+    sentiment_kws = ['should you buy', 'target price', 'target of', 'brokerage', 'upside', 'gmp', 'ipo gmp', 'daily voice', 'interview', 'momentum', 'technical', 'breakout', 'accumulate', 'recommend']
+    if any(k in title_lower for k in sentiment_kws):
+        m_score += 10; r_score += 8
+
+    research_kws = ['goldilocks', 'outlook', 'projections', 'structural reform', 'capital allocation', 'supply chain', 'unit economics', 'portfolio simplifying', 'strategy']
+    if any(k in title_lower for k in research_kws):
+        m_score += 2; r_score += 30
+
+    match_pct = re.search(r'(\d+(?:\.\d+)?)\s*%', title_lower)
+    if match_pct:
+        pct = float(match_pct.group(1))
+        if pct >= 20:
+            m_score += 12; r_score += 8
+        elif pct >= 10:
+            m_score += 8; r_score += 6
+        elif pct >= 5:
+            m_score += 5; r_score += 4
+        else:
+            m_score += 2; r_score += 2
+
+    if re.search(r'(\d+|\d+,\d+)\s*(crore|cr|billion|bln|million|mln|mn)\b', title_lower) or re.search(r'(\$|₹|usd|rs\.?|eur)\s*\d+', title_lower):
+        m_score += 10; r_score += 6
+
+    if event_id in EVENT_WEIGHTS:
+        ew = EVENT_WEIGHTS[event_id]
+        m_score += ew["market"]; r_score += ew["research"]
+    elif event_id and event_id != "#GENERAL_MARKET_UPDATE":
+        m_score += 8; r_score += 8
     else:
-        return 40
+        fallback_macro_regex = r'\b(rbi|fed|cpi|crude oil|war|gdp|monetary policy)\b'
+        if re.search(fallback_macro_regex, title_lower):
+            m_score += 10; r_score += 8
+
+    if article_type == "Breaking":
+        m_score += 10; r_score += 2
+    elif article_type == "Policy Decision":
+        m_score += 12; r_score += 12
+    elif article_type == "Explainer":
+        m_score += 0; r_score += 22
+
+    if any(k in title_lower for k in ['denies', 'unverified', 'fake news', 'myth', 'incorrect']):
+        m_score = max(5, m_score - 20)
+        r_score = max(10, r_score - 10)
+
+    if any(k in title_lower for k in ['what is', 'meaning of', 'definition', 'encyclopedia', 'britannica']):
+        m_score = min(15, m_score)
+
+    comp_market = compress_score(m_score)
+    comp_research = compress_score(r_score)
+
+    final_market_score = int(max(5, min(100, round(comp_market))))
+    final_research_score = int(max(10, min(100, round(comp_research))))
+
+    return final_market_score, final_research_score
 
 def get_priority(market_score, research_score, article_type):
     if article_type == "Policy Decision" or market_score >= 85:
@@ -261,9 +389,6 @@ def get_priority(market_score, research_score, article_type):
     else:
         return "ℹ️ NORMAL"
 
-# =====================================================================
-# 🔍 KEYWORD EXTRACTION & SMART EVENT DEDUPLICATION
-# =====================================================================
 def extract_keywords(text):
     text = re.sub(r'(bbc|ndtv|the hindu|reuters|cnbc|economic times|financial times|ettech|moneycontrol|sarkaritel|investment guru).*', '', text.lower())
     text = re.sub(r'[^\w\s]', '', text)
@@ -273,17 +398,14 @@ def extract_keywords(text):
 
 def is_same_event(new_title, event_id, threshold=0.35):
     global SENT_NEWS_MEMORY, RECENT_EVENT_IDS
-    
     current_time = time.time()
     
-    # 1. Event ID ఆధారంగా గత 45 నిమిషాల్లో పంపిన వార్త అయితే ఆపడం (స్మార్ట్ ఈవెంట్ డూప్లికేషన్)
     if event_id != "GENERAL_MARKET_UPDATE" and event_id in RECENT_EVENT_IDS:
         last_seen = RECENT_EVENT_IDS[event_id]
-        if current_time - last_seen < 2700: # 45 నిమిషాలు (2700 సెకన్లు)
+        if current_time - last_seen < 2700: 
             print(f"🚫 [EVENT ID TIMEOUT] #{event_id} వార్త 45 నిమిషాల వ్యవధిలో పంపబడింది. స్కిప్ చేస్తున్నాం.")
             return True
 
-    # 2. శీర్షిక మ్యాచింగ్ చెకర్
     new_keywords = extract_keywords(new_title)
     if not new_keywords:
         return False
@@ -355,31 +477,31 @@ def live_research_surveillance_worker():
             print(f"\n🔄 [{datetime.now().strftime('%H:%M:%S')}] RSS ఫీడ్స్ నుండి వార్తలను సేకరిస్తున్నాను...")
             for source_name, url in macro_feeds:
                 success = False
-                # 3 సార్లు రిట్రై చేసే లాజిక్ (Retry Mechanism)
                 for attempt in range(1, 4):
                     try:
-                        response = requests.get(url, headers=headers, timeout=20) # timeout 20s కి పెంచాము
+                        response = requests.get(url, headers=headers, timeout=25)
                         if response.status_code == 200:
                             root = ET.fromstring(response.content)
                             items = root.findall('.//item')
                             feed_count = 0
-                            for item in items[:3]:
+                            for item in items[:8]:
                                 title = item.find('title').text or ""
                                 desc = item.find('description').text or ""
+                                # 🔗 వార్త లింక్ ని లాగుతున్నాం సర్
+                                link = item.find('link').text or ""
                                 clean_desc = re.sub('<[^<]+?>', '', desc)
                                 full_text = f"{title} {clean_desc}".strip()
                                 if full_text: 
-                                    collected_news.append((source_name, title, full_text))
+                                    collected_news.append((source_name, title, full_text, link))
                                     feed_count += 1
                             print(f"📥 {source_name} నుండి {feed_count} వార్తలు సేకరించాను.")
                             success = True
-                            break # సక్సెస్ అయితే రిట్రై లూప్ నుండి బయటకు వస్తుంది
+                            break 
                     except Exception as feed_err:
                         print(f"⚠️ {source_name} ప్రయత్నం {attempt}/3 ఫెయిల్ అయింది: {feed_err}")
                         if attempt < 3:
-                            time.sleep(2) # మళ్లీ ప్రయత్నించే ముందు 2 సెకన్ల గ్యాప్
+                            time.sleep(2) 
                         else:
-                            # 3 సార్లు ఫెయిల్ అయితే మాత్రమే టెలిగ్రామ్‌కు మెసేజ్ పంపుతుంది
                             report_error_to_telegram(f"RSS Fetch ({source_name})", str(feed_err))
                     continue
 
@@ -391,7 +513,7 @@ def live_research_surveillance_worker():
             filtered_batch = []
             batch_seen_titles = []
 
-            for source, raw_title, news_text in collected_news:
+            for source, raw_title, news_text, article_link in collected_news:
                 article_type = detect_article_type(raw_title)
                 news_category = classify_news(raw_title)
                 event_id, impacted_assets, impacted_sectors, impacted_stocks = detect_event_and_impact(raw_title, news_category, article_type)
@@ -418,16 +540,15 @@ def live_research_surveillance_worker():
                     continue
 
                 batch_seen_titles.append(raw_title)
-                filtered_batch.append((source, raw_title, news_text, article_type, news_category, event_id, impacted_assets, impacted_sectors, impacted_stocks))
+                filtered_batch.append((source, raw_title, news_text, article_link, article_type, news_category, event_id, impacted_assets, impacted_sectors, impacted_stocks))
 
-            for source, raw_title, news_text, article_type, news_category, event_id, impacted_assets, impacted_sectors, impacted_stocks in filtered_batch:
+            for source, raw_title, news_text, article_link, article_type, news_category, event_id, impacted_assets, impacted_sectors, impacted_stocks in filtered_batch:
                 current_clean_content = clean_main_content(news_text)
 
                 SENT_NEWS_MEMORY.append(raw_title)
                 if len(SENT_NEWS_MEMORY) > 150:
                     SENT_NEWS_MEMORY.pop(0)
 
-                # Event ID టైమ్‌స్టాంప్ అప్‌డేట్ చేయడం
                 if event_id != "GENERAL_MARKET_UPDATE":
                     RECENT_EVENT_IDS[event_id] = time.time()
 
@@ -437,6 +558,7 @@ def live_research_surveillance_worker():
                             "clean_content": current_clean_content,
                             "title": raw_title.strip(),
                             "event_id": event_id,
+                            "link": article_link,
                             "timestamp": datetime.now()
                         })
                     except Exception:
@@ -445,8 +567,15 @@ def live_research_surveillance_worker():
                 safe_title = clean_for_html(raw_title)
                 safe_source = clean_for_html(source)
                 
-                market_score = get_market_score(raw_title, article_type)
-                research_score = get_research_score(raw_title, article_type)
+                market_score, research_score = calculate_dynamic_scores(
+                    raw_title, 
+                    article_type, 
+                    news_category, 
+                    source, 
+                    event_id, 
+                    debug=True
+                )
+
                 priority = get_priority(market_score, research_score, article_type)
 
                 try:
@@ -463,6 +592,7 @@ def live_research_surveillance_worker():
                     "telugu_title": safe_telugu_title,
                     "source": safe_source,
                     "full_text": news_text,
+                    "link": article_link, # 🔗 ఒరిజినల్ ఆర్టికల్ లింక్
                     "unique_id": unique_id,
                     "event_id": event_id,
                     "article_type": article_type,
@@ -475,7 +605,7 @@ def live_research_surveillance_worker():
                     "priority": priority
                 }
 
-                # 📩 10/10 Institutional Research Terminal Telegram Output
+                # 📩 లింక్ ఉన్న మెసేజ్ ఫార్మాట్
                 short_telegram_msg = f"{priority}\n\n" \
                                      f"🔑 <b>Event ID:</b> #{event_id}\n" \
                                      f"📝 <b>Article Type:</b> {article_type}\n" \
@@ -486,13 +616,17 @@ def live_research_surveillance_worker():
                                      f"📊 <b>Market Impact:</b> {market_score}/100 | 📚 <b>Research Value:</b> {research_score}/100\n\n" \
                                      f"🗞️ <b>శీర్షిక:</b> {safe_title}\n" \
                                      f"🔄 <b>తెలుగు:</b> {safe_telugu_title}\n\n" \
-                                     f"🌐 <b>మూలం:</b> {safe_source}"
+                                     f"🌐 <b>మూలం:</b> {safe_source}\n" \
+                                     f"🔗 <b>మూల వార్త:</b> <a href='{article_link}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>"
 
                 markup = InlineKeyboardMarkup()
                 analyze_btn = InlineKeyboardButton(text="🧠 Analyze with AI", callback_data=analyze_btn_id)
+                # 🌐 ఒరిజినల్ ఆర్టికల్ ని రీడైరెక్ట్ చేసే బటన్
+                link_btn = InlineKeyboardButton(text="🌐 Read Full Article", url=article_link)
                 markup.add(analyze_btn)
+                markup.add(link_btn)
                 
-                bot.send_message(YOUR_TELEGRAM_CHAT_ID, short_telegram_msg, reply_markup=markup, parse_mode="HTML")
+                bot.send_message(YOUR_TELEGRAM_CHAT_ID, short_telegram_msg, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
                 print(f"📤 [TELEGRAM SENT] [{event_id}] {safe_title}")
                 time.sleep(2)
                 
@@ -571,7 +705,7 @@ if __name__ == "__main__":
     load_past_news_from_db()
 
     start_msg = "🤖 <b>Institutional Research Terminal Bot v10.0 సిద్ధంగా ఉంది సర్!</b>\n\n" \
-                "🏆 <b>10/10 Complete Feature Upgrade:</b> Context-Aware Event IDs, Smart Timeout Deduplication & Affected Indian Stocks Layer అమర్చబడింది!"
+                "🏆 <b>10/10 Complete Feature Upgrade:</b> Direct Article Links Layer యాడ్ చేయబడింది!"
     
     try: bot.send_message(YOUR_TELEGRAM_CHAT_ID, start_msg, parse_mode="HTML")
     except: pass
@@ -610,9 +744,11 @@ if __name__ == "__main__":
                          f"📈 <b>Affected Stocks:</b> {vault_item.get('impacted_stocks', 'N/A')}\n"
                          f"📊 <b>Market Impact:</b> {vault_item.get('market_score', 50)}/100\n\n"
                          f"🗞️ <b>శీర్షిక:</b> {vault_item['title']}\n"
-                         f"🌐 <b>మూలం:</b> {vault_item['source']}\n\n"
+                         f"🌐 <b>మూలం:</b> {vault_item['source']}\n"
+                         f"🔗 <b>మూల వార్త:</b> <a href='{vault_item.get('link', '#')}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>\n\n"
                          f"⏳ <i>జెమిని AI ప్రత్యక్ష మార్కెట్ డేటాతో విశ్లేషణ చేస్తోంది...</i>",
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    disable_web_page_preview=True
                 )
                 
                 agent_output = run_gemini_analysis(vault_item)
@@ -641,11 +777,13 @@ if __name__ == "__main__":
                                          f"🔑 <b>Event ID:</b> #{vault_item.get('event_id', 'GENERAL')}\n" \
                                          f"🗞️ <b>వార్త శీర్షిక:</b> {vault_item['title']}\n" \
                                          f"🌐 <b>మూలం:</b> {vault_item['source']}\n" \
+                                         f"🔗 <b>మూల వార్త:</b> <a href='{vault_item.get('link', '#')}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>\n" \
                                          f"💡 <b>క్విక్ వ్యూ:</b> {safe_one_line}"
 
                     analysis_vault[view_id] = {
                         "title": vault_item['title'],
                         "source": vault_item['source'],
+                        "link": vault_item.get('link', '#'),
                         "parts": report_parts,
                         "original_text": short_telegram_msg,
                         "back_key": back_id
@@ -654,24 +792,34 @@ if __name__ == "__main__":
 
                     markup = InlineKeyboardMarkup()
                     view_btn = InlineKeyboardButton(text="🔎 పూర్తి విశ్లేషణ చదవండి (Read Full View)", callback_data=f"page_{unique_id}_0")
+                    link_btn = InlineKeyboardButton(text="🌐 Read Full Article", url=vault_item.get('link', '#'))
                     markup.add(view_btn)
+                    markup.add(link_btn)
                     
                     bot.edit_message_text(
                         chat_id=call.message.chat.id,
                         message_id=call.message.message_id,
                         text=short_telegram_msg,
                         reply_markup=markup,
-                        parse_mode="HTML"
+                        parse_mode="HTML",
+                        disable_web_page_preview=True
                     )
                 else:
+                    markup = InlineKeyboardMarkup()
+                    link_btn = InlineKeyboardButton(text="🌐 Read Full Article", url=vault_item.get('link', '#'))
+                    markup.add(link_btn)
+                    
                     bot.edit_message_text(
                         chat_id=call.message.chat.id,
                         message_id=call.message.message_id,
                         text=f"📢 <b>మార్కెట్ లైవ్ వార్త</b>\n\n"
                              f"🗞️ <b>శీర్షిక:</b> {vault_item['title']}\n"
-                             f"🌐 <b>మూలం:</b> {vault_item['source']}\n\n"
+                             f"🌐 <b>మూలం:</b> {vault_item['source']}\n"
+                             f"🔗 <b>మూల వార్త:</b> <a href='{vault_item.get('link', '#')}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>\n\n"
                              f"❌ <i>క్షమించండి, ప్రస్తుతం AI విశ్లేషణ అందుబాటులో లేదు లేదా లిమిట్ దాటింది.</i>",
-                        parse_mode="HTML"
+                        reply_markup=markup,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True
                     )
             else:
                 try: bot.answer_callback_query(call.id, text="❌ ఈ వార్త సమాచారం మెమొరీలో లేదు.", show_alert=True)
@@ -692,6 +840,7 @@ if __name__ == "__main__":
                 full_report = f"📊 <b>పూర్తి రీసెర్చ్ నివేదిక (Page {current_page + 1}/{total_pages})</b>\n\n" \
                               f"🗞 <b>వార్త:</b> {vault_data['title']}\n" \
                               f"🌐 <b>మూలం:</b> {vault_data['source']}\n" \
+                              f"🔗 <b>మూల వార్త:</b> <a href='{vault_data.get('link', '#')}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>\n" \
                               f"--------------------------------------------------\n\n" \
                               f"{page_content.strip()}"
                 
@@ -706,8 +855,9 @@ if __name__ == "__main__":
                     markup.row(*row_btns)
                 
                 markup.add(InlineKeyboardButton(text="🏠 Back to Alert", callback_data=vault_data['back_key']))
+                markup.add(InlineKeyboardButton(text="🌐 Read Full Article", url=vault_data.get('link', '#')))
                 
-                bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=full_report, reply_markup=markup, parse_mode="HTML")
+                bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=full_report, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
         elif msg_key.startswith("back_"):
             if msg_key in analysis_vault:
@@ -718,7 +868,8 @@ if __name__ == "__main__":
                     
                     original_markup = InlineKeyboardMarkup()
                     original_markup.add(InlineKeyboardButton(text="🔎 పూర్తి విశ్లేషణ చదవండి (Read Full View)", callback_data=f"page_{parts_key}_0"))
+                    original_markup.add(InlineKeyboardButton(text="🌐 Read Full Article", url=vault_data.get('link', '#')))
                     
-                    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=vault_data['original_text'], reply_markup=original_markup, parse_mode="HTML")
+                    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=vault_data['original_text'], reply_markup=original_markup, parse_mode="HTML", disable_web_page_preview=True)
 
     bot.infinity_polling()
