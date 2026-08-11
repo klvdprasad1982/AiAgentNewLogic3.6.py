@@ -17,7 +17,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🤖 Institutional Research Terminal Bot v10.0 is running 24/7 on Render!"
+    return "🤖 Institutional Research Terminal Bot v10.1 is running 24/7 on Render!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -45,6 +45,12 @@ try:
     db = mongo_client["TradingBotDB"]  
     news_collection = db["processed_news"]  
     news_collection.create_index("clean_content", unique=False)
+    news_collection.create_index("story_fingerprint", unique=False)
+    news_collection.create_index("event_id", unique=False)
+    news_collection.create_index("timestamp", unique=False)
+    # Exact duplicate safety: same fingerprint can never be claimed twice.
+    news_collection.create_index("dedupe_key", unique=True, sparse=True)
+    news_collection.create_index([("event_id", 1), ("timestamp", -1)])
     print("✅ MongoDB తో కనెక్షన్ సక్సెస్ అయింది సర్!")
 except Exception as mongo_init_err:
     print(f"❌ MongoDB స్టార్టింగ్ లోనే ఫెయిల్ అయింది: {mongo_init_err}")
@@ -53,6 +59,7 @@ except Exception as mongo_init_err:
 
 analysis_vault = {}
 SENT_NEWS_MEMORY = []
+SENT_NEWS_META = []  # {title, event_id, timestamp}
 RECENT_EVENT_IDS = {} 
 
 def report_error_to_telegram(error_location, error_msg):
@@ -389,45 +396,301 @@ def get_priority(market_score, research_score, article_type):
     else:
         return "ℹ️ NORMAL"
 
-def extract_keywords(text):
-    text = re.sub(r'(bbc|ndtv|the hindu|reuters|cnbc|economic times|financial times|ettech|moneycontrol|sarkaritel|investment guru).*', '', text.lower())
-    text = re.sub(r'[^\w\s]', '', text)
-    words = text.split()
-    stopwords = {'a', 'an', 'the', 'is', 'on', 'in', 'to', 'for', 'of', 'and', 'with', 'by', 'at', 'as', 'new', 'says', 'amid', 'over', 'via', 'how', 'what', 'why', 'are', 'they'}
-    return set(w for w in words if w not in stopwords and len(w) > 2)
+# =====================================================================
+# 🧠 Smart Story / Duplicate Engine
+# =====================================================================
+STORY_STOPWORDS = {
+    'the', 'a', 'an', 'and', 'or', 'but', 'to', 'of', 'in', 'on', 'for', 'with',
+    'from', 'by', 'as', 'at', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'says', 'said', 'say', 'amid', 'after', 'before', 'over', 'under', 'into',
+    'may', 'might', 'could', 'would', 'will', 'new', 'latest', 'update', 'news',
+    'report', 'reports', 'according', 'source', 'sources', 'today', 'now', 'live',
+    'india', 'indian', 'market', 'markets', 'shares', 'stock', 'stocks', 'price',
+    'prices', 'rises', 'rise', 'falls', 'fall', 'up', 'down', 'higher', 'lower',
+    'likely', 'expects', 'expect', 'outlook', 'impact', 'amidst', 'here', 'how',
+    'what', 'why', 'who', 'when', 'where', 'their', 'its', 'this', 'that'
+}
 
-def is_same_event(new_title, event_id, threshold=0.35):
-    global SENT_NEWS_MEMORY, RECENT_EVENT_IDS
-    current_time = time.time()
-    
-    if event_id != "GENERAL_MARKET_UPDATE" and event_id in RECENT_EVENT_IDS:
-        last_seen = RECENT_EVENT_IDS[event_id]
-        if current_time - last_seen < 2700: 
-            print(f"🚫 [EVENT ID TIMEOUT] #{event_id} వార్త 45 నిమిషాల వ్యవధిలో పంపబడింది. స్కిప్ చేస్తున్నాం.")
-            return True
+FINANCE_CONTEXT_KWS = {
+    'market', 'markets', 'stock', 'stocks', 'share', 'shares', 'equity', 'equities',
+    'investor', 'investors', 'investment', 'fund', 'funds', 'mutual', 'portfolio',
+    'trading', 'trade', 'brokerage', 'earnings', 'profit', 'revenue', 'ebitda',
+    'company', 'companies', 'corporate', 'bank', 'banks', 'credit', 'loan',
+    'rbi', 'fed', 'fomc', 'inflation', 'cpi', 'gdp', 'bond', 'yield', 'rupee',
+    'dollar', 'forex', 'currency', 'tariff', 'opec', 'crude', 'oil', 'brent',
+    'wti', 'gold', 'silver', 'copper', 'commodity', 'commodities', 'energy',
+    'cyber', 'cybersecurity', 'data breach', 'hack', 'ransomware', 'nclt', 'sebi'
+}
+
+NOISE_KWS = {
+    'cricket', 'ipl', 'football', 'soccer', 'tennis', 'movie', 'movies', 'film',
+    'bollywood', 'celebrity', 'actor', 'actress', 'entertainment', 'tv show',
+    'web series', 'recipe', 'travel', 'tourism', 'fashion', 'horoscope',
+    'lottery', 'game', 'gaming', 'sports', 'match', 'player', 'concert'
+}
+
+COMMODITY_SOURCE_NAMES = {'global_commodities_energy'}
+CYBER_SOURCE_NAMES = {'india_banking_arc_cyber'}
+
+
+def normalize_story_text(text):
+    text = str(text or '').lower()
+    text = re.sub(r'https?://\S+|www\.\S+', ' ', text)
+    text = re.sub(r'[^a-z0-9%₹$€£.\s-]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def extract_numbers(text):
+    """Extract material numeric facts so 5% vs 15% is not treated as the same story."""
+    text = normalize_story_text(text)
+    patterns = [
+        r'\b\d+(?:\.\d+)?%\b',
+        r'\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:crore|cr|billion|bln|million|mln|mn)\b',
+        r'(?:₹|\$|€|£)\s*\d+(?:,\d{3})*(?:\.\d+)?',
+        r'\bq[1-4]\b',
+        r'\bfy\d{2}\b',
+    ]
+    found = set()
+    for pattern in patterns:
+        found.update(re.findall(pattern, text))
+    return {re.sub(r'\s+', '', x) for x in found}
+
+
+def canonical_story_fingerprint(text):
+    """Create a stable exact-title fingerprint for restart-safe duplicate checks."""
+    normalized = normalize_story_text(text)
+    words = [
+        w for w in normalized.split()
+        if w not in STORY_STOPWORDS and len(w) > 2
+    ]
+    return " ".join(words)
+
+def extract_keywords(text):
+    text = normalize_story_text(text)
+    words = text.split()
+    return {
+        w for w in words
+        if w not in STORY_STOPWORDS and len(w) > 2 and not w.replace('.', '').isdigit()
+    }
+
+
+def extract_anchor_tokens(text):
+    """Keep words that identify the actual company / event / commodity."""
+    kws = extract_keywords(text)
+    anchor_words = {
+        'rbi', 'fed', 'fomc', 'ecb', 'boj', 'pboc', 'opec', 'sebi', 'nclt',
+        'tariff', 'sanctions', 'war', 'airstrike', 'acquisition', 'merger',
+        'buyout', 'ipo', 'earnings', 'results', 'profit', 'revenue', 'ebitda',
+        'dividend', 'guidance', 'downgrade', 'upgrade', 'default', 'fraud',
+        'investigation', 'bankruptcy', 'insolvency', 'cyber', 'ransomware',
+        'breach', 'inflation', 'cpi', 'gdp', 'crude', 'brent', 'wti', 'gold',
+        'silver', 'copper', 'natural', 'gas', 'bond', 'yield', 'rupee', 'dollar'
+    }
+    return (kws & anchor_words) | {w for w in kws if len(w) >= 6}
+
+
+def story_similarity(title_a, title_b):
+    a = extract_keywords(title_a)
+    b = extract_keywords(title_b)
+    if not a or not b:
+        return 0.0, set(), set()
+    common = a & b
+    # Containment score is useful for headlines where one source has extra wording.
+    containment = len(common) / max(1, min(len(a), len(b)))
+    jaccard = len(common) / max(1, len(a | b))
+    score = 0.65 * containment + 0.35 * jaccard
+    return score, common, a | b
+
+
+def is_relevant_news(source_name, title, description=''):
+    """Reject obvious non-financial noise from broad Google News feeds."""
+    text = normalize_story_text(f"{title} {description}")
+    source_key = normalize_story_text(source_name).replace(' ', '_')
+
+    noise_hits = [k for k in NOISE_KWS if k in text]
+    finance_hits = [k for k in FINANCE_CONTEXT_KWS if k in text]
+
+    # For the broad commodities feed, require a clear market/commodity context.
+    if source_key in COMMODITY_SOURCE_NAMES:
+        commodity_hits = [k for k in ('crude', 'oil', 'brent', 'wti', 'opec', 'gold', 'silver', 'copper', 'natural gas', 'lng', 'iron ore', 'coal') if k in text]
+        if not commodity_hits or (noise_hits and not finance_hits):
+            return False
+
+    # Banking/ARC/Cyber feed should contain a business/financial/cyber context.
+    if source_key in CYBER_SOURCE_NAMES:
+        cyber_hits = [k for k in ('arc', 'asset reconstruction', 'jc flowers', 'acre', 'data breach', 'cyber', 'ransomware', 'credit growth', 'credit card', 'bank credit', 'liquidity', 'nri deposit') if k in text]
+        if not cyber_hits:
+            return False
+
+    # Global safety filter: do not let obvious entertainment/sports noise enter the research layer.
+    if noise_hits and not finance_hits:
+        return False
+    return True
+
+
+def make_dedupe_key(title, article_link=""):
+    """Stable key for exact duplicate protection across restarts/processes."""
+    fingerprint = canonical_story_fingerprint(title)
+    normalized_link = normalize_story_text(article_link)
+    return fingerprint if fingerprint else normalized_link
+
+
+def db_has_similar_story(new_title, event_id, threshold=0.55):
+    """Check MongoDB for recent semantic duplicates, not just exact titles."""
+    if news_collection is None:
+        return False
+    try:
+        docs = news_collection.find(
+            {"event_id": event_id},
+            {"title": 1, "timestamp": 1}
+        ).sort("timestamp", -1).limit(500)
+
+        new_numbers = extract_numbers(new_title)
+        new_anchors = extract_anchor_tokens(new_title)
+        for doc in docs:
+            old_title = doc.get("title", "")
+            if not old_title:
+                continue
+            score, _, _ = story_similarity(new_title, old_title)
+            old_numbers = extract_numbers(old_title)
+            old_anchors = extract_anchor_tokens(old_title)
+            number_conflict = bool(new_numbers and old_numbers and not (new_numbers & old_numbers))
+            number_overlap = bool(new_numbers and old_numbers and (new_numbers & old_numbers))
+            anchor_overlap = len(new_anchors & old_anchors)
+
+            if canonical_story_fingerprint(new_title) == canonical_story_fingerprint(old_title):
+                return True
+            if score >= threshold and not number_conflict:
+                return True
+            if anchor_overlap >= 2 and number_overlap and score >= 0.38:
+                return True
+    except Exception as e:
+        print(f"⚠️ MongoDB semantic duplicate check failed: {e}")
+    return False
+
+
+def claim_exact_news_in_db(title, article_link, event_id, source):
+    """Atomically reserve an exact story before Telegram send.
+    Returns True only for the first process that claims it.
+    """
+    if news_collection is None:
+        return True
+    dedupe_key = make_dedupe_key(title, article_link)
+    if not dedupe_key:
+        return True
+    try:
+        news_collection.insert_one({
+            "dedupe_key": dedupe_key,
+            "clean_content": clean_main_content(title),
+            "title": title.strip(),
+            "story_fingerprint": canonical_story_fingerprint(title),
+            "event_id": event_id,
+            "link": article_link,
+            "source": source,
+            "timestamp": datetime.now()
+        })
+        return True
+    except Exception as e:
+        # Duplicate-key means another running process already claimed it.
+        if "E11000" in str(e) or "duplicate key" in str(e).lower():
+            print(f"🚫 [MONGO EXACT DUPLICATE] {title}")
+            return False
+        print(f"⚠️ MongoDB exact-claim error: {e}")
+        return True
+
+
+def is_same_event(new_title, event_id, threshold=0.55):
+    """
+    Smart duplicate check.
+
+    IMPORTANT:
+    - Same Event ID alone is NOT enough.
+    - Exact/similar stories are blocked.
+    - If both headlines contain material numbers and the numbers conflict
+      (e.g. 5% vs 15%), similarity alone must NOT mark them as duplicates.
+    - A high anchor overlap + matching material number can still identify
+      the same story even when wording differs.
+    """
+    global SENT_NEWS_MEMORY, SENT_NEWS_META
+
+    # MongoDB is the permanent memory; RAM is only the fast layer.
+    if db_has_similar_story(new_title, event_id, threshold=threshold):
+        print(f"🚫 [MONGO SMART DUPLICATE] #{event_id} | {new_title}")
+        return True
 
     new_keywords = extract_keywords(new_title)
+    new_numbers = extract_numbers(new_title)
+    new_anchors = extract_anchor_tokens(new_title)
+
     if not new_keywords:
         return False
 
-    for sent_title in SENT_NEWS_MEMORY:
-        sent_keywords = extract_keywords(sent_title)
-        if not sent_keywords:
+    for meta in SENT_NEWS_META:
+        old_event = meta.get('event_id', 'GENERAL_MARKET_UPDATE')
+        old_title = meta.get('title', '')
+        if not old_title:
             continue
-        common = new_keywords.intersection(sent_keywords)
-        similarity = len(common) / min(len(new_keywords), len(sent_keywords))
-        if similarity >= threshold:
+
+        # Compare only inside the same event cluster.
+        if old_event != event_id:
+            continue
+
+        score, common, _ = story_similarity(new_title, old_title)
+        old_numbers = extract_numbers(old_title)
+        old_anchors = extract_anchor_tokens(old_title)
+
+        number_overlap = bool(
+            new_numbers and old_numbers and (new_numbers & old_numbers)
+        )
+        number_conflict = bool(
+            new_numbers and old_numbers and not (new_numbers & old_numbers)
+        )
+        anchor_overlap = len(new_anchors & old_anchors)
+
+        # 1) Exact normalized story/title match.
+        if canonical_story_fingerprint(new_title) == canonical_story_fingerprint(old_title):
+            print(f"🚫 [SMART DUPLICATE: EXACT] #{event_id} | {new_title}")
             return True
+
+        # 2) Strong similarity is duplicate ONLY when material numbers do not conflict.
+        #    This fixes the old 5% vs 15% problem.
+        if score >= threshold and not number_conflict:
+            print(
+                f"🚫 [SMART DUPLICATE] score={score:.2f} | "
+                f"#{event_id} | {new_title}"
+            )
+            return True
+
+        # 3) Strong factual match: anchors + same material number.
+        if anchor_overlap >= 2 and number_overlap and score >= 0.38:
+            print(
+                f"🚫 [SMART DUPLICATE: FACT MATCH] "
+                f"anchors={anchor_overlap} | #{event_id} | {new_title}"
+            )
+            return True
+
     return False
 
 def load_past_news_from_db():
-    global SENT_NEWS_MEMORY
+    global SENT_NEWS_MEMORY, SENT_NEWS_META
     if news_collection is not None:
         try:
-            past_docs = list(news_collection.find({}, {"title": 1}).sort("timestamp", -1).limit(200))
+            past_docs = list(
+                news_collection.find(
+                    {},
+                    {"title": 1, "event_id": 1, "timestamp": 1, "story_fingerprint": 1}
+                ).sort("timestamp", -1).limit(1000)
+            )
             for doc in past_docs:
-                if "title" in doc and doc["title"]:
-                    SENT_NEWS_MEMORY.append(doc["title"])
+                title = doc.get('title', '')
+                if title:
+                    SENT_NEWS_MEMORY.append(title)
+                    SENT_NEWS_META.append({
+                        'title': title,
+                        'event_id': doc.get('event_id', 'GENERAL_MARKET_UPDATE'),
+                        'timestamp': doc.get('timestamp', datetime.now())
+                    })
             print(f"✅ MongoDB నుండి {len(SENT_NEWS_MEMORY)} పాత వార్తలను RAM లోకి లోడ్ చేసాము సర్!")
         except Exception as e:
             print(f"⚠️ పాత వార్తలను లోడ్ చేయడంలో లోపం: {e}")
@@ -491,9 +754,11 @@ def live_research_surveillance_worker():
                                 link = item.find('link').text or ""
                                 clean_desc = re.sub('<[^<]+?>', '', desc)
                                 full_text = f"{title} {clean_desc}".strip()
-                                if full_text: 
+                                if full_text and is_relevant_news(source_name, title, clean_desc):
                                     collected_news.append((source_name, title, full_text, link))
                                     feed_count += 1
+                                else:
+                                    print(f"🚫 [NOISE FILTER] {source_name}: {title}")
                             print(f"📥 {source_name} నుండి {feed_count} వార్తలు సేకరించాను.")
                             success = True
                             break 
@@ -523,20 +788,29 @@ def live_research_surveillance_worker():
                     continue
 
                 is_batch_duplicate = False
-                new_keywords = extract_keywords(raw_title)
-                
                 for seen_title in batch_seen_titles:
-                    seen_keywords = extract_keywords(seen_title)
-                    if not new_keywords or not seen_keywords:
-                        continue
-                    common = new_keywords.intersection(seen_keywords)
-                    similarity = len(common) / min(len(new_keywords), len(seen_keywords))
-                    if similarity >= 0.30: 
+                    similarity, common, _ = story_similarity(raw_title, seen_title)
+                    new_numbers = extract_numbers(raw_title)
+                    old_numbers = extract_numbers(seen_title)
+                    anchor_overlap = len(extract_anchor_tokens(raw_title) & extract_anchor_tokens(seen_title))
+                    number_overlap = bool(new_numbers and old_numbers and (new_numbers & old_numbers))
+                    number_conflict = bool(
+                        new_numbers and old_numbers and not (new_numbers & old_numbers)
+                    )
+
+                    if (
+                        (similarity >= 0.55 and not number_conflict)
+                        or
+                        (anchor_overlap >= 2 and number_overlap and similarity >= 0.38)
+                    ):
                         is_batch_duplicate = True
+                        print(
+                            f"🚫 [SKIP BATCH SMART DUPLICATE] "
+                            f"score={similarity:.2f} | {raw_title}"
+                        )
                         break
 
                 if is_batch_duplicate:
-                    print(f"🚫 [SKIP BATCH DUPLICATE] {raw_title}")
                     continue
 
                 batch_seen_titles.append(raw_title)
@@ -546,23 +820,26 @@ def live_research_surveillance_worker():
                 current_clean_content = clean_main_content(news_text)
 
                 SENT_NEWS_MEMORY.append(raw_title)
-                if len(SENT_NEWS_MEMORY) > 150:
+                SENT_NEWS_META.append({
+                    'title': raw_title,
+                    'event_id': event_id,
+                    'timestamp': datetime.now(),
+                    'story_fingerprint': canonical_story_fingerprint(raw_title)
+                })
+                if len(SENT_NEWS_MEMORY) > 200:
                     SENT_NEWS_MEMORY.pop(0)
+                if len(SENT_NEWS_META) > 200:
+                    SENT_NEWS_META.pop(0)
 
+                # Keep this timestamp only for monitoring/debugging; it is NO LONGER a blanket duplicate block.
                 if event_id != "GENERAL_MARKET_UPDATE":
                     RECENT_EVENT_IDS[event_id] = time.time()
 
-                if news_collection is not None:
-                    try:
-                        news_collection.insert_one({
-                            "clean_content": current_clean_content,
-                            "title": raw_title.strip(),
-                            "event_id": event_id,
-                            "link": article_link,
-                            "timestamp": datetime.now()
-                        })
-                    except Exception:
-                        pass
+                # MongoDB exact claim happens immediately before Telegram delivery.
+                # This protects against duplicate sends when two bot processes run together.
+                if not claim_exact_news_in_db(raw_title, article_link, event_id, source):
+                    print(f"🚫 [SKIP MONGO CLAIM DUPLICATE] {raw_title}")
+                    continue
 
                 safe_title = clean_for_html(raw_title)
                 safe_source = clean_for_html(source)
@@ -704,8 +981,8 @@ if __name__ == "__main__":
 
     load_past_news_from_db()
 
-    start_msg = "🤖 <b>Institutional Research Terminal Bot v10.0 సిద్ధంగా ఉంది సర్!</b>\n\n" \
-                "🏆 <b>10/10 Complete Feature Upgrade:</b> Direct Article Links Layer యాడ్ చేయబడింది!"
+    start_msg = "🤖 <b>Institutional Research Terminal Bot v10.1 సిద్ధంగా ఉంది సర్!</b>\n\n" \
+                "🏆 <b>10/10 Duplicate Engine Upgrade:</b> Direct Article Links Layer యాడ్ చేయబడింది!"
     
     try: bot.send_message(YOUR_TELEGRAM_CHAT_ID, start_msg, parse_mode="HTML")
     except: pass
