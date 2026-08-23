@@ -4,6 +4,7 @@ import requests
 import xml.etree.ElementTree as ET
 import re
 import threading
+import html
 from datetime import datetime
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton  
