@@ -529,11 +529,22 @@ def is_relevant_news(source_name, title, description=''):
     return True
 
 
+def clean_news_title_core(title):
+    if not title: return ""
+    title = html.unescape(title)
+    sources_pattern = r"(Investing\.com|Moneycontrol\.com|Moneycontrol|CNBC-TV18|CNBC|Economic Times|ETMarkets\.com|Business Standard|Mint|Livemint|Reuters|NDTV Profit|ET NOW)"
+    title = re.sub(rf"\s*[-–|]?\s*{sources_pattern}.*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r'https?://\S+|www\.\S+', '', title)
+    title = re.sub(r'[^a-zA-Z0-9\s]', '', title)
+    return " ".join(title.lower().split())
+
+def canonical_story_fingerprint(text):
+    clean_t = clean_news_title_core(text)
+    words = [w for w in clean_t.split() if w not in STORY_STOPWORDS and len(w) > 2]
+    return " ".join(words)
+
 def make_dedupe_key(title, article_link=""):
-    """Stable key for exact duplicate protection across restarts/processes."""
-    fingerprint = canonical_story_fingerprint(title)
-    normalized_link = normalize_story_text(article_link)
-    return fingerprint if fingerprint else normalized_link
+    return canonical_story_fingerprint(title)
 
 
 def db_has_similar_story(new_title, event_id, threshold=0.55):
@@ -680,7 +691,7 @@ def load_past_news_from_db():
                 news_collection.find(
                     {},
                     {"title": 1, "event_id": 1, "timestamp": 1, "story_fingerprint": 1}
-                ).sort("timestamp", -1).limit(1000)
+                ).sort("timestamp", -1).limit(2000)
             )
             for doc in past_docs:
                 title = doc.get('title', '')
@@ -709,10 +720,10 @@ def live_research_surveillance_worker():
     # 2. Moneycontrol Financial Articles Master Feed
     ("Moneycontrol_Insights_Via_Google", 
      "https://news.google.com/rss/search?q=site:moneycontrol.com+intitle:(%22mutual+funds%22+OR+%22investment%22+OR+%22strategy%22+OR+%22market%22+OR+%22stocks%22+OR+%22finance%22+OR+%22outlook%22)&hl=en-IN&gl=IN&ceid=IN:en"),
-
-    # 3. Indian Banking, ARC, Cyber & Credit Feed
-    ("India_Banking_ARC_Cyber",
-     "https://news.google.com/rss/search?q=(%22ARC%22+OR+%22Asset+Reconstruction%22+OR+%22JC+Flowers%22+OR+%22ACRE%22+OR+%22Data+Breach%22+OR+%22Cyber%22+OR+%22NRI+Deposit%22+OR+%22Credit+Growth%22+OR+%22Credit+Card%22+OR+%22Bank+Credit%22+OR+%22Liquidity%22)&hl=en-IN&gl=IN&ceid=IN:en"),
+        
+    # 3. Indian Banking, ARC & Credit Feed
+    ("India_Banking_ARC_Credit",
+     "https://news.google.com/rss/search?q=(%22ARC%22+OR+%22Asset+Reconstruction%22+OR+%22JC+Flowers%22+OR+%22ACRE%22+OR+%22NRI+Deposit%22+OR+%22Credit+Growth%22+OR+%22Credit+Card%22+OR+%22Bank+Credit%22+OR+%22Liquidity%22)&hl=en-IN&gl=IN&ceid=IN:en"),
 
     # 4. Indian Macro, RBI Policies & Economic Outlook Feed
     ("India_Macro_RBI_Govt",
@@ -826,9 +837,9 @@ def live_research_surveillance_worker():
                     'timestamp': datetime.now(),
                     'story_fingerprint': canonical_story_fingerprint(raw_title)
                 })
-                if len(SENT_NEWS_MEMORY) > 200:
+                if len(SENT_NEWS_MEMORY) > 2000:
                     SENT_NEWS_MEMORY.pop(0)
-                if len(SENT_NEWS_META) > 200:
+                if len(SENT_NEWS_META) > 2000:
                     SENT_NEWS_META.pop(0)
 
                 # Keep this timestamp only for monitoring/debugging; it is NO LONGER a blanket duplicate block.
