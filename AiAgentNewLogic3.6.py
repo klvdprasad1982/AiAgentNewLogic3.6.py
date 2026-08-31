@@ -715,24 +715,42 @@ def live_research_surveillance_worker():
     print("\n🕵️‍♂️ [START] Live Research Team నిరంతర నిఘా లూప్ ప్రారంభమైంది సర్...")
     
     macro_feeds = [
-        # 1. Moneycontrol Financial Articles Master Feed
-        (
-            "Moneycontrol_Insights_Via_Google",
-            "https://news.google.com/rss/search?q=site:moneycontrol.com+intitle:(%22mutual+funds%22+OR+%22Monetary+Policy+Committee%22+OR+%22Credit+Growth%22+OR+%22Credit+Card%22+OR+%22Reserve+Bank+of+India%22+OR+%22Gold%22+OR+%22Silver%22+OR+%22market+outlook%22)&hl=en-IN&gl=IN&ceid=IN:en"
-        ),
-         
-        # 2. Global Central Banks & Foreign Macro Economy Feed
-        (
-            "Global_Central_Banks_Macro",
-            "https://news.google.com/rss/search?q=(%22Federal+Reserve%22+OR+%22FOMC%22+OR+%22European+Central+Bank%22+OR+%22ECB%22+OR+%22Bank+of+England%22+OR+%22Bank+of+Japan%22+OR+%22BOJ%22+OR+%22Peoples+Bank+of+China%22+OR+%22PBOC%22+OR+%22US+Inflation%22+OR+%22Personal+Consumption+Expenditures%22+OR+%22PCE%22+OR+%22Nonfarm+Payrolls%22+OR+%22Unemployment%22+OR+%22Treasury+Yield%22+OR+%22Dollar+Index%22+OR+%22DXY%22+OR+%22US+GDP%22+OR+%22China+Economy%22+OR+%22Trade+War%22+OR+%22Tariffs%22+OR+%22Recession%22)&hl=en-IN&gl=IN&ceid=IN:en"
-        ),
+    # 1. Moneycontrol Financial Articles Master Feed
+    (
+        "Moneycontrol_Insights_Via_Google",
+        "https://news.google.com/rss/search?q=site:moneycontrol.com+intitle:(%22mutual+funds%22+OR+%22Monetary+Policy+Committee%22+OR+%22Credit+Growth%22+OR+%22Credit+Card%22+OR+%22Reserve+Bank+of+India%22+OR+%22Gold%22+OR+%22Silver%22+OR+%22market+outlook%22)&hl=en-IN&gl=IN&ceid=IN:en"
+    ),
+     
+    # 2. Global Central Banks & Foreign Macro Economy Feed
+    (
+        "Global_Central_Banks_Macro",
+        "https://news.google.com/rss/search?q=(%22Federal+Reserve%22+OR+%22FOMC%22+OR+%22European+Central+Bank%22+OR+%22ECB%22+OR+%22Bank+of+England%22+OR+%22Bank+of+Japan%22+OR+%22BOJ%22+OR+%22Peoples+Bank+of+China%22+OR+%22PBOC%22+OR+%22US+Inflation%22+OR+%22Personal+Consumption+Expenditures%22+OR+%22PCE%22+OR+%22Nonfarm+Payrolls%22+OR+%22Unemployment%22+OR+%22Treasury+Yield%22+OR+%22Dollar+Index%22+OR+%22DXY%22+OR+%22US+GDP%22+OR+%22China+Economy%22+OR+%22Trade+War%22+OR+%22Tariffs%22+OR+%22Recession%22)&hl=en-IN&gl=IN&ceid=IN:en"
+    ),
 
-        # 3. Expert Articles, Daily Voices & Brokerage Reports Feed
-        (
-            "Expert_Articles_Brokerage_Reports",
-            "https://news.google.com/rss/search?q=(%22Daily+Voice%22+OR+%22Expert+View%22+OR+%22Market+Guru%22+OR+%22Brokerage+Report%22+OR+%22Stock+Strategy%22+OR+%22Investing+Strategy%22)+AND+(%22Moneycontrol%22+OR+%22Economic+Times%22+OR+%22Livemint%22)&hl=en-IN&gl=IN&ceid=IN:en"
-        )
-    ]
+    # 3. Expert Articles, Daily Voices & Brokerage Reports Feed
+    (
+        "Expert_Articles_Brokerage_Reports",
+        "https://news.google.com/rss/search?q=(%22Daily+Voice%22+OR+%22Expert+View%22+OR+%22Market+Guru%22+OR+%22Brokerage+Report%22+OR+%22Stock+Strategy%22+OR+%22Investing+Strategy%22)+AND+(%22Moneycontrol%22+OR+%22Economic+Times%22+OR+%22Livemint%22)&hl=en-IN&gl=IN&ceid=IN:en"
+    ),
+    
+    # 4. Economy, RBI Policies, Government Budget & Taxes Feed
+    (
+        "Economy_Policy_Budget",
+        "https://news.google.com/rss/search?q=(%22RBI%22+OR+%22Repo+Rate%22+OR+%22Inflation%22+OR+%22GDP%22+OR+%22Union+Budget%22+OR+%22Tax%22+OR+%22Fiscal+Deficit%22+OR+%22Monetary+Policy%22)&hl=en-IN&gl=IN&ceid=IN:en"
+    ),
+
+    # 5. Brokerage Houses, Stock Target Prices, Buy/Sell Research Reports Feed
+    (
+        "Brokerage_Recommendations",
+        "https://news.google.com/rss/search?q=(%22Brokerage%22+OR+%22ICICI+Direct%22+OR+%22Motilal+Oswal%22+OR+%22Jefferies%22+OR+%22Target+Price%22+OR+%22Buy+Call%22+OR+%22Sell+Call%22+OR+%22Stock+Recommendation%22)&hl=en-IN&gl=IN&ceid=IN:en"
+    ),
+
+    # 6. Mutual Funds, NFOs & Personal Finance Feed
+    (
+        "Mutual_Funds_Personal_Finance",
+        "https://news.google.com/rss/search?q=(%22Mutual+Fund%22+OR+%22NFO%22+OR+%22SIP%22+OR+%22Personal+Finance%22+OR+%22Fund+Returns%22+OR+%22Investment+Strategy%22)&hl=en-IN&gl=IN&ceid=IN:en"
+    )
+]
     while True:
         try:
             collected_news = []
