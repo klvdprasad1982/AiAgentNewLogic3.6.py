@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 import re
 import threading
 import html
-from datetime import datetime
+from datetime import datetime, timedelta
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton  
 from google import genai  
@@ -18,7 +18,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🤖 Institutional Research Terminal Bot v10.1 is running 24/7 on Render!"
+    return "🤖 Institutional Research Terminal Bot v10.4 is running 24/7 on Render!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -35,35 +35,54 @@ MONGO_URI = os.environ.get("MONGO_URI", "")
 GEMINI_API_KEY = MY_GEMINI_API_KEY_1
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+if not TELEGRAM_BOT_TOKEN:
+    print("⚠️ TELEGRAM_BOT_TOKEN environment variable is empty.")
+if not GEMINI_API_KEY:
+    print("⚠️ GEMINI_API_KEY environment variable is empty.")
+if not YOUR_TELEGRAM_CHAT_ID:
+    print("⚠️ TELEGRAM_CHAT_ID environment variable is empty.")
+
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
 # =====================================================================
 # 🥭 MongoDB డేటాబేస్ సెటప్
 # =====================================================================
-print("🥭 MongoDB కి కనెక్ట్ అవుతున్నాము సర్...")
-try:
-    mongo_client = MongoClient(MONGO_URI)
-    db = mongo_client["TradingBotDB"]  
-    news_collection = db["processed_news"]  
-    news_collection.create_index("clean_content", unique=False)
-    news_collection.create_index("story_fingerprint", unique=False)
-    news_collection.create_index("event_id", unique=False)
-    news_collection.create_index("timestamp", unique=False)
-    # Exact duplicate safety: same fingerprint can never be claimed twice.
-    news_collection.create_index("dedupe_key", unique=True, sparse=True)
-    news_collection.create_index([("event_id", 1), ("timestamp", -1)])
-    print("✅ MongoDB తో కనెక్షన్ సక్సెస్ అయింది సర్!")
-except Exception as mongo_init_err:
-    print(f"❌ MongoDB స్టార్టింగ్ లోనే ఫెయిల్ అయింది: {mongo_init_err}")
-    db = None
-    news_collection = None
+db = None
+news_collection = None
+if MONGO_URI.strip():
+    print("🥭 MongoDB కి కనెక్ట్ అవుతున్నాము సర్...")
+    try:
+        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        mongo_client.admin.command("ping")
+        db = mongo_client["TradingBotDB"]
+        news_collection = db["processed_news"]
+        news_collection.create_index("clean_content", unique=False)
+        news_collection.create_index("story_fingerprint", unique=False)
+        news_collection.create_index("event_id", unique=False)
+        news_collection.create_index("timestamp", unique=False)
+        news_collection.create_index("dedupe_key", unique=True, sparse=True)
+        news_collection.create_index([("event_id", 1), ("timestamp", -1)])
+        print("✅ MongoDB తో కనెక్షన్ సక్సెస్ అయింది సర్!")
+    except Exception as mongo_init_err:
+        print(f"⚠️ MongoDB అందుబాటులో లేదు — RAM deduplicationతో కొనసాగుతున్నాము: {mongo_init_err}")
+        db = None
+        news_collection = None
+else:
+    print("ℹ️ MONGO_URI ఇవ్వలేదు — MongoDB లేకుండా Strong RAM + Batch Deduplication modeలో నడుస్తోంది సర్!")
 
 analysis_vault = {}
 SENT_NEWS_MEMORY = []
-SENT_NEWS_META = []  # {title, event_id, timestamp}
+SENT_NEWS_META = []  
 RECENT_EVENT_IDS = {} 
 
 def report_error_to_telegram(error_location, error_msg):
+    if any(err in str(error_msg) for err in ["10054", "Connection aborted", "ConnectionResetError", "timed out", "Max retries exceeded"]):
+        print(f"⚠️ [NETWORK NOTICE Ignored for Telegram] Location: {error_location} | Error: {error_msg}")
+        return
+
+    if bot is None or not YOUR_TELEGRAM_CHAT_ID:
+        print(f"⚠️ [{error_location}] {error_msg}")
+        return
     try:
         err_text = f"⚠️ <b>[BOT ERROR ALERT]</b>\n\n" \
                    f"📍 <b>Location:</b> {error_location}\n" \
@@ -136,67 +155,48 @@ def classify_news(title):
 
 def detect_event_and_impact(title, category, article_type):
     title_lower = title.lower()
-    if 'tariff' in title_lower or 'trade' in title_lower:
-        event_id = "TRADE_EXPLAINER" if article_type == "Explainer" else ("TRADE_RESEARCH" if article_type == "Research" else "GLOBAL_TRADE_WAR")
-    elif 'rbi' in title_lower or 'repo rate' in title_lower:
-        event_id = "RBI_POLICY_EXPLAINER" if article_type == "Explainer" else "RBI_MONETARY_POLICY"
-    elif 'fed' in title_lower or 'fomc' in title_lower:
-        event_id = "FED_POLICY_EXPLAINER" if article_type == "Explainer" else "US_FED_POLICY"
-    elif 'japan' in title_lower and 'inflation' in title_lower:
-        event_id = "BOJ_JAPAN_INFLATION"
-    elif any(k in title_lower for k in ['crude', 'oil', 'brent', 'opec']):
+    if any(k in title_lower for k in ['rbi', 'repo rate', 'monetary policy', 'governor']):
+        event_id = "RBI_MONETARY_POLICY"
+    elif any(k in title_lower for k in ['fed', 'fomc', 'powell', 'us inflation', 'us cpi']):
+        event_id = "US_FED_POLICY"
+    elif any(k in title_lower for k in ['tariff', 'import duty', 'export duty', 'trade war']):
+        event_id = "GLOBAL_TRADE_WAR"
+    elif any(k in title_lower for k in ['crude', 'oil', 'brent', 'opec', 'petrol', 'diesel']):
         event_id = "GLOBAL_OIL_SHOCK"
-    elif any(k in title_lower for k in ['war', 'airstrike', 'middle east']):
+    elif any(k in title_lower for k in ['sebi', 'penalty', 'ban', 'regulations']):
+        event_id = "SEBI_REGULATORY_ACTION"
+    elif any(k in title_lower for k in ['earnings', 'results', 'profit', 'net profit', 'revenue', 'q1', 'q2', 'q3', 'q4']):
+        words = [w for w in title_lower.split() if w not in STORY_STOPWORDS and len(w) > 3]
+        company_tag = words[0].upper() if words else "CORP"
+        event_id = f"EARNINGS_{company_tag}"
+    elif any(k in title_lower for k in ['war', 'conflict', 'airstrike', 'geopolitical']):
         event_id = "GEOPOLITICAL_CONFLICT"
-    elif 'pli scheme' in title_lower:
-        event_id = "GOVT_PLI_SCHEME"
-    elif any(k in title_lower for k in ['acquisition', 'merger', 'buyout']):
-        event_id = "CORPORATE_M_AND_A"
     else:
-        event_id = "GENERAL_MARKET_UPDATE"
+        clean_words = [w for w in re.findall(r'[a-z0-9]+', title_lower) if w not in STORY_STOPWORDS and len(w) > 3]
+        event_id = f"EVT_{'_'.join(clean_words[:2])}".upper() if clean_words else "GENERAL_MARKET_UPDATE"
 
     impacted_assets = set()
     impacted_sectors = set()
     impacted_stocks = set()
     
-    if any(k in title_lower for k in ['tariff', 'trade']):
+    if 'tariff' in title_lower or 'trade' in title_lower:
         impacted_assets.update(['USD/INR', 'DXY', 'Export Index'])
         impacted_sectors.update(['IT', 'Pharma', 'Textiles', 'Auto Component'])
-        impacted_stocks.update(['TCS', 'Infosys', 'Sun Pharma', 'Tata Motors', 'Gokaldas Exports'])
-
-    if any(k in title_lower for k in ['crude', 'oil', 'brent', 'opec']):
-        impacted_assets.update(['Brent Crude', 'USD/INR', 'India10Y Yield'])
-        impacted_sectors.update(['Paints', 'Aviation', 'OMCs', 'Tyres', 'Chemicals'])
-        impacted_stocks.update(['Reliance', 'BPCL', 'HPCL', 'IOC', 'Asian Paints', 'Indigo', 'MRF'])
-
-    if any(k in title_lower for k in ['rbi', 'fed', 'rate', 'repo', 'inflation']):
-        if 'cut' in title_lower:
-            impacted_assets.update(['Nifty', 'BankNifty (Bullish)', 'Bonds'])
-        elif 'hike' in title_lower or 'high' in title_lower:
-            impacted_assets.update(['India10Y Yield (Up)', 'USD/INR', 'Gold'])
-        else:
-            impacted_assets.update(['Nifty', 'BankNifty', 'India10Y', 'Gold'])
-            
-        impacted_sectors.update(['Banking', 'NBFCs', 'Real Estate', 'Auto'])
-        impacted_stocks.update(['HDFC Bank', 'SBI', 'ICICI Bank', 'Bajaj Finance', 'DLF', 'Maruti'])
-
-    if any(k in title_lower for k in ['acquisition', 'merger', 'buyout']):
-        impacted_assets.update(['Target Company Share Price'])
-        impacted_sectors.update(['Consolidating Sector'])
-        impacted_stocks.update(['Acquiring Corp', 'Target Corp'])
-
-    if not impacted_assets:
+        impacted_stocks.update(['TCS', 'Infosys', 'Sun Pharma', 'Tata Motors'])
+    elif 'crude' in title_lower or 'oil' in title_lower:
+        impacted_assets.update(['Brent Crude', 'USD/INR'])
+        impacted_sectors.update(['Paints', 'Aviation', 'OMCs', 'Tyres'])
+        impacted_stocks.update(['Reliance', 'BPCL', 'HPCL', 'Asian Paints', 'Indigo'])
+    elif 'rbi' in title_lower or 'fed' in title_lower:
+        impacted_assets.update(['Nifty', 'BankNifty', 'India10Y Yield'])
+        impacted_sectors.update(['Banking', 'NBFCs', 'Real Estate'])
+        impacted_stocks.update(['HDFC Bank', 'SBI', 'ICICI Bank', 'Bajaj Finance'])
+    else:
         impacted_assets.add('Nifty 50')
-    if not impacted_sectors:
         impacted_sectors.add(category)
-    if not impacted_stocks:
-        impacted_stocks.add('Nifty Top 10 Broad Index')
+        impacted_stocks.add('Broad Market')
 
-    assets_str = ", ".join(list(impacted_assets)[:5])
-    sectors_str = ", ".join(list(impacted_sectors)[:5])
-    stocks_str = ", ".join(list(impacted_stocks)[:6])
-    
-    return event_id, assets_str, sectors_str, stocks_str
+    return event_id, ", ".join(list(impacted_assets)[:3]), ", ".join(list(impacted_sectors)[:3]), ", ".join(list(impacted_stocks)[:4])
 
 SOURCE_CONFIG = {
     "regulators": {
@@ -261,7 +261,7 @@ def calculate_dynamic_scores(title, article_type, category, source=None, event_i
     title_lower = title.lower()
     source_lower = str(source).lower()
     category_lower = str(category).lower()
-    
+      
     m_score = 0
     r_score = 0
     reasons = []
@@ -308,7 +308,7 @@ def calculate_dynamic_scores(title, article_type, category, source=None, event_i
         'tumble', 'tumbles', 'tumbled', 'slips', 'slides', 'hits low',
         'record low', '52-week low', 'hits lower circuit'
     ]
-    
+      
     if any(re.search(r'\b' + re.escape(k) + r'\b', title_lower) for k in price_action_kws):
         m_score += 15; r_score += 8
 
@@ -316,7 +316,7 @@ def calculate_dynamic_scores(title, article_type, category, source=None, event_i
     if any(re.search(r'\b' + re.escape(k) + r'\b', title_lower) for k in earnings_kws):
         is_negative = any(k in title_lower for k in ['falls', 'drops', 'slides', 'declines', 'misses', 'down', 'loss', 'slips'])
         is_positive = any(k in title_lower for k in ['surges', 'rises', 'jumps', 'soars', 'doubles', 'up', 'grows'])
-        
+          
         if is_negative:
             m_score += 22; r_score += 10
         elif is_positive:
@@ -337,7 +337,7 @@ def calculate_dynamic_scores(title, article_type, category, source=None, event_i
         m_score += 10; r_score += 8
 
     research_kws = ['goldilocks', 'outlook', 'projections', 'structural reform', 'capital allocation', 'supply chain', 'unit economics', 'portfolio simplifying', 'strategy']
-    if any(k in title_lower for k in research_kws):
+    if any(re.search(r'\b' + re.escape(k) + r'\b', title_lower) for k in research_kws):
         m_score += 2; r_score += 30
 
     match_pct = re.search(r'(\d+(?:\.\d+)?)\s*%', title_lower)
@@ -397,9 +397,6 @@ def get_priority(market_score, research_score, article_type):
     else:
         return "ℹ️ NORMAL"
 
-# =====================================================================
-# 🧠 Smart Story / Duplicate Engine
-# =====================================================================
 STORY_STOPWORDS = {
     'the', 'a', 'an', 'and', 'or', 'but', 'to', 'of', 'in', 'on', 'for', 'with',
     'from', 'by', 'as', 'at', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
@@ -433,7 +430,6 @@ NOISE_KWS = {
 COMMODITY_SOURCE_NAMES = {'global_commodities_energy'}
 CYBER_SOURCE_NAMES = {'india_banking_arc_cyber'}
 
-
 def normalize_story_text(text):
     text = str(text or '').lower()
     text = re.sub(r'https?://\S+|www\.\S+', ' ', text)
@@ -441,9 +437,7 @@ def normalize_story_text(text):
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-
 def extract_numbers(text):
-    """Extract material numeric facts so 5% vs 15% is not treated as the same story."""
     text = normalize_story_text(text)
     patterns = [
         r'\b\d+(?:\.\d+)?%\b',
@@ -457,16 +451,6 @@ def extract_numbers(text):
         found.update(re.findall(pattern, text))
     return {re.sub(r'\s+', '', x) for x in found}
 
-
-def canonical_story_fingerprint(text):
-    """Create a stable exact-title fingerprint for restart-safe duplicate checks."""
-    normalized = normalize_story_text(text)
-    words = [
-        w for w in normalized.split()
-        if w not in STORY_STOPWORDS and len(w) > 2
-    ]
-    return " ".join(words)
-
 def extract_keywords(text):
     text = normalize_story_text(text)
     words = text.split()
@@ -475,9 +459,7 @@ def extract_keywords(text):
         if w not in STORY_STOPWORDS and len(w) > 2 and not w.replace('.', '').isdigit()
     }
 
-
 def extract_anchor_tokens(text):
-    """Keep words that identify the actual company / event / commodity."""
     kws = extract_keywords(text)
     anchor_words = {
         'rbi', 'fed', 'fomc', 'ecb', 'boj', 'pboc', 'opec', 'sebi', 'nclt',
@@ -490,45 +472,44 @@ def extract_anchor_tokens(text):
     }
     return (kws & anchor_words) | {w for w in kws if len(w) >= 6}
 
-
 def story_similarity(title_a, title_b):
     a = extract_keywords(title_a)
     b = extract_keywords(title_b)
     if not a or not b:
         return 0.0, set(), set()
     common = a & b
-    # Containment score is useful for headlines where one source has extra wording.
     containment = len(common) / max(1, min(len(a), len(b)))
     jaccard = len(common) / max(1, len(a | b))
     score = 0.65 * containment + 0.35 * jaccard
     return score, common, a | b
 
+def detect_allowed_publisher(title, link="", description=""):
+    blob = f"{title} {link} {description}".lower()
+    if "investing.com" in blob or re.search(r"\binvesting\s*\.?\s*com\b", blob):
+        return "Investing.com"
+    if "moneycontrol.com" in blob or "moneycontrol" in blob:
+        return "Moneycontrol.com"
+    return ""
 
 def is_relevant_news(source_name, title, description=''):
-    """Reject obvious non-financial noise from broad Google News feeds."""
     text = normalize_story_text(f"{title} {description}")
     source_key = normalize_story_text(source_name).replace(' ', '_')
-
     noise_hits = [k for k in NOISE_KWS if k in text]
     finance_hits = [k for k in FINANCE_CONTEXT_KWS if k in text]
 
-    # For the broad commodities feed, require a clear market/commodity context.
     if source_key in COMMODITY_SOURCE_NAMES:
         commodity_hits = [k for k in ('crude', 'oil', 'brent', 'wti', 'opec', 'gold', 'silver', 'copper', 'natural gas', 'lng', 'iron ore', 'coal') if k in text]
         if not commodity_hits or (noise_hits and not finance_hits):
             return False
 
-    # Banking/ARC/Cyber feed should contain a business/financial/cyber context.
     if source_key in CYBER_SOURCE_NAMES:
         cyber_hits = [k for k in ('arc', 'asset reconstruction', 'jc flowers', 'acre', 'data breach', 'cyber', 'ransomware', 'credit growth', 'credit card', 'bank credit', 'liquidity', 'nri deposit') if k in text]
         if not cyber_hits:
             return False
 
-    # Global safety filter: do not let obvious entertainment/sports noise enter the research layer.
     if noise_hits and not finance_hits:
         return False
     return True
-
 
 def clean_news_title_core(title):
     if not title: return ""
@@ -547,45 +528,251 @@ def canonical_story_fingerprint(text):
 def make_dedupe_key(title, article_link=""):
     return canonical_story_fingerprint(title)
 
+def _print_duplicate_rejection(reason, new_title, old_title="", event_id="", score=None,
+                              new_source="", old_source=""):
+    print("\n" + "=" * 78)
+    print("🚫 [DUPLICATE REJECTED]")
+    print(f"    Reason    : {reason}")
+    print(f"    Event ID  : NOT GENERATED (duplicate checked first)")
+    if score is not None:
+        print(f"    Similarity: {score:.3f}")
+    if new_source:
+        print(f"    New source: {new_source}")
+    if old_source:
+        print(f"    Old source: {old_source}")
+    print(f"    NEW       : {new_title}")
+    if old_title:
+        print(f"    EXISTING  : {old_title}")
+    print("=" * 78 + "\n")
 
-def db_has_similar_story(new_title, event_id, threshold=0.55):
-    """Check MongoDB for recent semantic duplicates, not just exact titles."""
-    if news_collection is None:
-        return False
-    try:
-        docs = news_collection.find(
-            {"event_id": event_id},
-            {"title": 1, "timestamp": 1}
-        ).sort("timestamp", -1).limit(500)
+def _number_conflict(title_a, title_b):
+    a = extract_numbers(title_a)
+    b = extract_numbers(title_b)
+    return bool(a and b and not (a & b))
 
-        new_numbers = extract_numbers(new_title)
-        new_anchors = extract_anchor_tokens(new_title)
-        for doc in docs:
-            old_title = doc.get("title", "")
-            if not old_title:
+def _same_story_score(title_a, title_b):
+    score, common, union = story_similarity(title_a, title_b)
+    return score, common, union
+
+STORY_TOPIC_GROUPS = {
+    "GDP": {"gdp", "gross domestic product", "economy expands", "economy growth"},
+    "INFLATION": {"inflation", "cpi", "pce", "consumer prices", "price pressures"},
+    "RATES_FED": {"fed", "fomc", "federal reserve", "interest rate", "rate cut", "rate hike", "policy rate"},
+    "RATES_RBI": {"rbi", "repo rate", "monetary policy", "policy rate"},
+    "GOLD": {"gold", "bullion"},
+    "SILVER": {"silver"},
+    "OIL": {"crude", "oil", "brent", "wti", "opec"},
+    "MUTUAL_FUNDS": {"mutual fund", "mutual funds", "sip", "nfo", "fund scheme", "funds"},
+    "EARNINGS": {"earnings", "results", "profit", "revenue", "ebitda", "net profit"},
+    "TARIFF_TRADE": {"tariff", "trade war", "import duty", "export duty", "sanctions"},
+    "SEBI": {"sebi", "f&o", "fno", "derivatives", "brokerage app"},
+    "IPO": {"ipo", "initial public offering", "listing"},
+    "MERGER": {"merger", "acquisition", "buyout", "stake"},
+}
+
+def detect_story_topics(text):
+    t = normalize_story_text(text)
+    topics = set()
+    for topic, terms in STORY_TOPIC_GROUPS.items():
+        if any(term in t for term in terms):
+            topics.add(topic)
+    return topics
+
+def important_story_tokens(text):
+    words = extract_keywords(text)
+    generic = {
+        "remains", "remain", "elevated", "push", "pushes", "pushing", "brightens",
+        "brighten", "growth", "grows", "growing", "beats", "beat", "beating",
+        "forecast", "expected", "expects", "outlook", "signals", "signal", "await",
+        "awaits", "awaiting", "today", "daily", "voice", "current", "recent", "developments",
+        "financial", "economic", "economics", "data", "index", "report", "reports",
+        "says", "said", "according", "reveals", "revealed", "explains", "explains", "time",
+        "buy", "sell", "dip", "rise", "rises", "fall", "falls", "higher", "lower", "amid",
+        "energy", "costs", "prices", "price", "market", "markets", "traders", "trading"
+    }
+    return {w for w in words if w not in generic and len(w) >= 4}
+
+def _extract_title_dates(title):
+    s = title or ""
+    patterns = [
+        r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+        r"dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?\b",
+        r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b",
+        r"\b\d{4}-\d{1,2}-\d{1,2}\b",
+    ]
+    found = set()
+    for p in patterns:
+        found.update(x.lower() for x in re.findall(p, s, flags=re.I))
+    return found
+
+def _is_generic_title(title):
+    toks = set(re.findall(r"[a-z0-9]+", (title or "").lower()))
+    generic = {
+        "stock", "stocks", "market", "markets", "today", "live", "news",
+        "update", "updates", "latest", "moneycontrol", "investing", "india",
+        "indian", "shares", "share", "business", "finance", "financial"
+    }
+    meaningful = toks - generic
+    return len(meaningful) <= 3
+
+def find_duplicate_reason(new_title, event_id=None, article_link="", source="",
+                         candidates=None):
+    new_title = (new_title or "").strip()
+    new_fp = canonical_story_fingerprint(new_title)
+    new_link = (article_link or "").strip().lower()
+    new_dates = _extract_title_dates(new_title)
+    new_numbers = extract_numbers(new_title)
+    new_topics = detect_story_topics(new_title)
+    new_important = important_story_tokens(new_title)
+    new_anchors = extract_anchor_tokens(new_title)
+    new_generic = _is_generic_title(new_title)
+
+    action_terms = {
+        "launches", "launched", "launch", "acquires", "acquired", "acquisition",
+        "merges", "merged", "merger", "buys", "bought", "sells", "sold",
+        "stake", "dividend", "downgrade", "upgrade", "cuts", "cut", "hikes",
+        "hike", "holds", "held", "unchanged", "maintains", "maintained",
+        "approves", "approved", "rejects", "rejected", "sanctions", "sanctioned",
+        "penalty", "warns", "warning", "inflation", "gdp", "cpi", "pce",
+        "repo", "tariff", "airstrike", "profit", "revenue", "earnings",
+        "guidance", "default", "bankruptcy", "growth", "expands", "expanded",
+        "rises", "rose", "falls", "fell", "surges", "surged", "tumbles", "tumbled"
+    }
+    new_actions = new_important & action_terms
+
+    for old in candidates or []:
+        old_title = str(old.get("title") or "").strip()
+        if not old_title:
+            continue
+
+        old_link = str(old.get("link") or "").strip().lower()
+        old_fp = old.get("story_fingerprint") or canonical_story_fingerprint(old_title)
+        old_dates = _extract_title_dates(old_title)
+        old_numbers = extract_numbers(old_title)
+        old_topics = detect_story_topics(old_title)
+        old_important = important_story_tokens(old_title)
+        old_anchors = extract_anchor_tokens(old_title)
+        old_actions = old_important & action_terms
+        old_generic = _is_generic_title(old_title)
+
+        if new_link and old_link and new_link == old_link:
+            return True, "SAME_ARTICLE_URL", 1.0, old_title, old.get("source", "")
+
+        if new_fp and old_fp and new_fp == old_fp:
+            return True, "EXACT_CANONICAL_STORY", 1.0, old_title, old.get("source", "")
+
+        score, _, _ = _same_story_score(new_title, old_title)
+
+        if new_dates and old_dates and new_dates != old_dates:
+            continue
+
+        number_overlap = bool(new_numbers and old_numbers and (new_numbers & old_numbers))
+        number_conflict = bool(new_numbers and old_numbers and not (new_numbers & old_numbers))
+        topic_overlap = new_topics & old_topics
+        important_overlap = len(new_important & old_important)
+        anchor_overlap = len(new_anchors & old_anchors)
+        action_overlap = len(new_actions & old_actions)
+
+        if number_conflict:
+            continue
+
+        if new_generic or old_generic:
+            if not (number_overlap and anchor_overlap >= 2 and score >= 0.55):
                 continue
-            score, _, _ = story_similarity(new_title, old_title)
-            old_numbers = extract_numbers(old_title)
-            old_anchors = extract_anchor_tokens(old_title)
-            number_conflict = bool(new_numbers and old_numbers and not (new_numbers & old_numbers))
-            number_overlap = bool(new_numbers and old_numbers and (new_numbers & old_numbers))
-            anchor_overlap = len(new_anchors & old_anchors)
 
-            if canonical_story_fingerprint(new_title) == canonical_story_fingerprint(old_title):
-                return True
-            if score >= threshold and not number_conflict:
-                return True
-            if anchor_overlap >= 2 and number_overlap and score >= 0.38:
-                return True
+        if topic_overlap and number_overlap:
+            if important_overlap >= 2 or anchor_overlap >= 2:
+                return True, "SAME_TOPIC_SAME_KEY_FACT", score, old_title, old.get("source", "")
+
+        if topic_overlap and action_overlap >= 1 and score >= 0.50:
+            if important_overlap >= 3 or anchor_overlap >= 2:
+                return True, "SAME_TOPIC_SAME_EVENT_ACTION", score, old_title, old.get("source", "")
+
+        if score >= 0.78 and (important_overlap >= 3 or anchor_overlap >= 3):
+            return True, "VERY_HIGH_STORY_SIMILARITY", score, old_title, old.get("source", "")
+
+        if anchor_overlap >= 3 and number_overlap and score >= 0.30:
+            return True, "SAME_ANCHORS_AND_FACTS", score, old_title, old.get("source", "")
+
+    return False, "", 0.0, "", ""
+
+def _get_recent_db_candidates(hours=48, limit=5000):
+    if news_collection is None:
+        return []
+    cutoff = datetime.now() - timedelta(hours=hours)
+    try:
+        docs = list(
+            news_collection.find(
+                {"timestamp": {"$gte": cutoff}},
+                {
+                    "title": 1,
+                    "event_id": 1,
+                    "link": 1,
+                    "source": 1,
+                    "story_fingerprint": 1,
+                    "timestamp": 1,
+                }
+            ).sort("timestamp", -1).limit(limit)
+        )
+        return docs
     except Exception as e:
-        print(f"⚠️ MongoDB semantic duplicate check failed: {e}")
+        print(f"⚠️ MongoDB duplicate candidates read failed: {e}")
+        return []
+
+def is_same_event(new_title, event_id, article_link="", source="",
+                  extra_candidates=None):
+    candidates = []
+    candidates.extend(_get_recent_db_candidates(hours=48, limit=5000))
+
+    for meta in SENT_NEWS_META:
+        candidates.append({
+            "title": meta.get("title", ""),
+            "event_id": meta.get("event_id", "GENERAL_MARKET_UPDATE"),
+            "link": meta.get("link", ""),
+            "source": meta.get("source", ""),
+            "story_fingerprint": meta.get("story_fingerprint", ""),
+        })
+
+    if extra_candidates:
+        candidates.extend(extra_candidates)
+
+    seen = set()
+    unique_candidates = []
+    for item in candidates:
+        key = (
+            str(item.get("title", "")).strip().lower(),
+            str(item.get("event_id", "")),
+        )
+        if key in seen or not key[0]:
+            continue
+        seen.add(key)
+        unique_candidates.append(item)
+
+    duplicate, reason, score, old_title, old_source = find_duplicate_reason(
+        new_title=new_title,
+        event_id=event_id,
+        article_link=article_link,
+        source=source,
+        candidates=unique_candidates,
+    )
+
+    if duplicate:
+        _print_duplicate_rejection(
+            reason=reason,
+            new_title=new_title,
+            old_title=old_title,
+            event_id=event_id,
+            score=score,
+            new_source=source,
+            old_source=old_source,
+        )
+        return True
+
+    print(f"✅ [UNIQUE STORY — DUPLICATE CHECK PASSED] | {source} | {new_title}")
     return False
 
-
 def claim_exact_news_in_db(title, article_link, event_id, source):
-    """Atomically reserve an exact story before Telegram send.
-    Returns True only for the first process that claims it.
-    """
     if news_collection is None:
         return True
     dedupe_key = make_dedupe_key(title, article_link)
@@ -604,85 +791,15 @@ def claim_exact_news_in_db(title, article_link, event_id, source):
         })
         return True
     except Exception as e:
-        # Duplicate-key means another running process already claimed it.
         if "E11000" in str(e) or "duplicate key" in str(e).lower():
-            print(f"🚫 [MONGO EXACT DUPLICATE] {title}")
+            _print_duplicate_rejection(
+                reason="MONGODB_CANONICAL_KEY_ALREADY_EXISTS",
+                new_title=title,
+                event_id=event_id,
+                new_source=source,
+            )
             return False
-        print(f"⚠️ MongoDB exact-claim error: {e}")
         return True
-
-
-def is_same_event(new_title, event_id, threshold=0.55):
-    """
-    Smart duplicate check.
-
-    IMPORTANT:
-    - Same Event ID alone is NOT enough.
-    - Exact/similar stories are blocked.
-    - If both headlines contain material numbers and the numbers conflict
-      (e.g. 5% vs 15%), similarity alone must NOT mark them as duplicates.
-    - A high anchor overlap + matching material number can still identify
-      the same story even when wording differs.
-    """
-    global SENT_NEWS_MEMORY, SENT_NEWS_META
-
-    # MongoDB is the permanent memory; RAM is only the fast layer.
-    if db_has_similar_story(new_title, event_id, threshold=threshold):
-        print(f"🚫 [MONGO SMART DUPLICATE] #{event_id} | {new_title}")
-        return True
-
-    new_keywords = extract_keywords(new_title)
-    new_numbers = extract_numbers(new_title)
-    new_anchors = extract_anchor_tokens(new_title)
-
-    if not new_keywords:
-        return False
-
-    for meta in SENT_NEWS_META:
-        old_event = meta.get('event_id', 'GENERAL_MARKET_UPDATE')
-        old_title = meta.get('title', '')
-        if not old_title:
-            continue
-
-        # Compare only inside the same event cluster.
-        if old_event != event_id:
-            continue
-
-        score, common, _ = story_similarity(new_title, old_title)
-        old_numbers = extract_numbers(old_title)
-        old_anchors = extract_anchor_tokens(old_title)
-
-        number_overlap = bool(
-            new_numbers and old_numbers and (new_numbers & old_numbers)
-        )
-        number_conflict = bool(
-            new_numbers and old_numbers and not (new_numbers & old_numbers)
-        )
-        anchor_overlap = len(new_anchors & old_anchors)
-
-        # 1) Exact normalized story/title match.
-        if canonical_story_fingerprint(new_title) == canonical_story_fingerprint(old_title):
-            print(f"🚫 [SMART DUPLICATE: EXACT] #{event_id} | {new_title}")
-            return True
-
-        # 2) Strong similarity is duplicate ONLY when material numbers do not conflict.
-        #    This fixes the old 5% vs 15% problem.
-        if score >= threshold and not number_conflict:
-            print(
-                f"🚫 [SMART DUPLICATE] score={score:.2f} | "
-                f"#{event_id} | {new_title}"
-            )
-            return True
-
-        # 3) Strong factual match: anchors + same material number.
-        if anchor_overlap >= 2 and number_overlap and score >= 0.38:
-            print(
-                f"🚫 [SMART DUPLICATE: FACT MATCH] "
-                f"anchors={anchor_overlap} | #{event_id} | {new_title}"
-            )
-            return True
-
-    return False
 
 def load_past_news_from_db():
     global SENT_NEWS_MEMORY, SENT_NEWS_META
@@ -691,66 +808,69 @@ def load_past_news_from_db():
             past_docs = list(
                 news_collection.find(
                     {},
-                    {"title": 1, "event_id": 1, "timestamp": 1, "story_fingerprint": 1}
-                ).sort("timestamp", -1).limit(2000)
+                    {
+                        "title": 1,
+                        "event_id": 1,
+                        "timestamp": 1,
+                        "story_fingerprint": 1,
+                        "link": 1,
+                        "source": 1,
+                    }
+                ).sort("timestamp", -1).limit(5000)
             )
+            SENT_NEWS_MEMORY.clear()
+            SENT_NEWS_META.clear()
+
             for doc in past_docs:
-                title = doc.get('title', '')
+                title = doc.get("title", "")
                 if title:
                     SENT_NEWS_MEMORY.append(title)
                     SENT_NEWS_META.append({
-                        'title': title,
-                        'event_id': doc.get('event_id', 'GENERAL_MARKET_UPDATE'),
-                        'timestamp': doc.get('timestamp', datetime.now())
+                        "title": title,
+                        "event_id": doc.get("event_id", "GENERAL_MARKET_UPDATE"),
+                        "timestamp": doc.get("timestamp", datetime.now()),
+                        "story_fingerprint": doc.get(
+                            "story_fingerprint",
+                            canonical_story_fingerprint(title)
+                        ),
+                        "link": doc.get("link", ""),
+                        "source": doc.get("source", ""),
                     })
             print(f"✅ MongoDB నుండి {len(SENT_NEWS_MEMORY)} పాత వార్తలను RAM లోకి లోడ్ చేసాము సర్!")
         except Exception as e:
             print(f"⚠️ పాత వార్తలను లోడ్ చేయడంలో లోపం: {e}")
 
-#=====================================================================
+# =====================================================================
 # 📰 Continuous Macro & Sector Surveillance Team
 # =====================================================================
 def live_research_surveillance_worker():
     global analysis_vault, SENT_NEWS_MEMORY, RECENT_EVENT_IDS
     print("\n🕵️‍♂️ [START] Live Research Team నిరంతర నిఘా లూప్ ప్రారంభమైంది సర్...")
     
+    print("🎯 SOURCE WHITELIST: Moneycontrol.com + Investing.com మాత్రమే")
     macro_feeds = [
-    # 1. Moneycontrol Financial Articles Master Feed
-    (
-        "Moneycontrol_Insights_Via_Google",
-        "https://news.google.com/rss/search?q=site:moneycontrol.com+intitle:(%22mutual+funds%22+OR+%22Monetary+Policy+Committee%22+OR+%22Credit+Growth%22+OR+%22Credit+Card%22+OR+%22Reserve+Bank+of+India%22+OR+%22Gold%22+OR+%22Silver%22+OR+%22market+outlook%22)&hl=en-IN&gl=IN&ceid=IN:en"
-    ),
-     
-    # 2. Global Central Banks & Foreign Macro Economy Feed
-    (
-        "Global_Central_Banks_Macro",
-        "https://news.google.com/rss/search?q=(%22Federal+Reserve%22+OR+%22FOMC%22+OR+%22European+Central+Bank%22+OR+%22ECB%22+OR+%22Bank+of+England%22+OR+%22Bank+of+Japan%22+OR+%22BOJ%22+OR+%22Peoples+Bank+of+China%22+OR+%22PBOC%22+OR+%22US+Inflation%22+OR+%22Personal+Consumption+Expenditures%22+OR+%22PCE%22+OR+%22Nonfarm+Payrolls%22+OR+%22Unemployment%22+OR+%22Treasury+Yield%22+OR+%22Dollar+Index%22+OR+%22DXY%22+OR+%22US+GDP%22+OR+%22China+Economy%22+OR+%22Trade+War%22+OR+%22Tariffs%22+OR+%22Recession%22)&hl=en-IN&gl=IN&ceid=IN:en"
-    ),
-
-    # 3. Expert Articles, Daily Voices & Brokerage Reports Feed
-    (
-        "Expert_Articles_Brokerage_Reports",
-        "https://news.google.com/rss/search?q=(%22Daily+Voice%22+OR+%22Expert+View%22+OR+%22Market+Guru%22+OR+%22Brokerage+Report%22+OR+%22Stock+Strategy%22+OR+%22Investing+Strategy%22)+AND+(%22Moneycontrol%22+OR+%22Economic+Times%22+OR+%22Livemint%22)&hl=en-IN&gl=IN&ceid=IN:en"
-    ),
+        (
+            "Moneycontrol_Insights_Via_Google",
+            "https://news.google.com/rss/search?q=site:moneycontrol.com+intitle:(%22mutual+funds%22+OR+%22Monetary+Policy+Committee%22+OR+%22Credit+Growth%22+OR+%22Credit+Card%22+OR+%22Reserve+Bank+of+India%22+OR+%22Gold%22+OR+%22Silver%22+OR+%22market+outlook%22)+AND+(site%3Amoneycontrol.com+OR+site%3Ainvesting.com)&hl=en-IN&gl=IN&ceid=IN:en"
+        ),
+        (
+            "Global_Central_Banks_Macro",
+            "https://news.google.com/rss/search?q=(%22Federal+Reserve%22+OR+%22FOMC%22+OR+%22European+Central+Bank%22+OR+%22ECB%22+OR+%22Bank+of+England%22+OR+%22Bank+of+Japan%22+OR+%22BOJ%22+OR+%22Peoples+Bank+of+China%22+OR+%22PBOC%22+OR+%22US+Inflation%22+OR+%22Personal+Consumption+Expenditures%22+OR+%22PCE%22+OR+%22Nonfarm+Payrolls%22+OR+%22Unemployment%22+OR+%22Treasury+Yield%22+OR+%22Dollar+Index%22+OR+%22DXY%22+OR+%22US+GDP%22+OR+%22China+Economy%22+OR+%22Trade+War%22+OR+%22Tariffs%22+OR+%22Recession%22)+AND+(site%3Amoneycontrol.com+OR+site%3Ainvesting.com)&hl=en-IN&gl=IN&ceid=IN:en"
+        ),
+        (
+            "Expert_Articles_Brokerage_Reports",
+            "https://news.google.com/rss/search?q=(%22Daily+Voice%22+OR+%22Expert+View%22+OR+%22Market+Guru%22+OR+%22Brokerage+Report%22+OR+%22Stock+Strategy%22+OR+%22Investing+Strategy%22)+AND+(%22Moneycontrol%22+OR+%22Economic+Times%22+OR+%22Livemint%22)+AND+(site%3Amoneycontrol.com+OR+site%3Ainvesting.com)&hl=en-IN&gl=IN&ceid=IN:en"
+        ),
+        (
+            "Economy_Policy_Budget",
+            "https://news.google.com/rss/search?q=(%22RBI%22+OR+%22Repo+Rate%22+OR+%22Inflation%22+OR+%22GDP%22+OR+%22Union+Budget%22+OR+%22Tax%22+OR+%22Fiscal+Deficit%22+OR+%22Monetary+Policy%22)+AND+(site%3Amoneycontrol.com+OR+site%3Ainvesting.com)&hl=en-IN&gl=IN&ceid=IN:en"
+        ),
+        (
+            "Brokerage_Recommendations",
+            "https://news.google.com/rss/search?q=(%22Brokerage%22+OR+%22ICICI+Direct%22+OR+%22Motilal+Oswal%22+OR+%22Jefferies%22+OR+%22Target+Price%22+OR+%22Buy+Call%22+OR+%22Sell+Call%22+OR+%22Stock+Recommendation%22)+AND+(site%3Amoneycontrol.com+OR+site%3Ainvesting.com)&hl=en-IN&gl=IN&ceid=IN:en"
+        ),
+    ]
     
-    # 4. Economy, RBI Policies, Government Budget & Taxes Feed
-    (
-        "Economy_Policy_Budget",
-        "https://news.google.com/rss/search?q=(%22RBI%22+OR+%22Repo+Rate%22+OR+%22Inflation%22+OR+%22GDP%22+OR+%22Union+Budget%22+OR+%22Tax%22+OR+%22Fiscal+Deficit%22+OR+%22Monetary+Policy%22)&hl=en-IN&gl=IN&ceid=IN:en"
-    ),
-
-    # 5. Brokerage Houses, Stock Target Prices, Buy/Sell Research Reports Feed
-    (
-        "Brokerage_Recommendations",
-        "https://news.google.com/rss/search?q=(%22Brokerage%22+OR+%22ICICI+Direct%22+OR+%22Motilal+Oswal%22+OR+%22Jefferies%22+OR+%22Target+Price%22+OR+%22Buy+Call%22+OR+%22Sell+Call%22+OR+%22Stock+Recommendation%22)&hl=en-IN&gl=IN&ceid=IN:en"
-    ),
-
-    # 6. Mutual Funds, NFOs & Personal Finance Feed
-    (
-        "Mutual_Funds_Personal_Finance",
-        "https://news.google.com/rss/search?q=(%22Mutual+Fund%22+OR+%22NFO%22+OR+%22SIP%22+OR+%22Personal+Finance%22+OR+%22Fund+Returns%22+OR+%22Investment+Strategy%22)&hl=en-IN&gl=IN&ceid=IN:en"
-    )
-]
     while True:
         try:
             collected_news = []
@@ -761,122 +881,100 @@ def live_research_surveillance_worker():
                 "Connection": "keep-alive"
             }
             
-            print(f"\n🔄 [{datetime.now().strftime('%H:%M:%S')}] RSS ఫీడ్స్ నుండి వార్తలను సేకరిస్తున్నాను...")
+            print(f"\n🔄 [{datetime.now().strftime('%H:%M:%S')}] Google News RSS → Moneycontrol + Investing.com వార్తలను సేకరిస్తున్నాను...")
             for source_name, url in macro_feeds:
-                success = False
                 for attempt in range(1, 4):
                     try:
                         response = requests.get(url, headers=headers, timeout=25)
                         if response.status_code == 200:
                             root = ET.fromstring(response.content)
                             items = root.findall('.//item')
-                            feed_count = 0
                             for item in items[:8]:
                                 title = item.find('title').text or ""
                                 desc = item.find('description').text or ""
-                                # 🔗 వార్త లింక్ ని లాగుతున్నాం సర్
                                 link = item.find('link').text or ""
                                 clean_desc = re.sub('<[^<]+?>', '', desc)
                                 full_text = f"{title} {clean_desc}".strip()
+                                publisher = detect_allowed_publisher(title, link, clean_desc)
+
+                                if not publisher:
+                                    continue
+
                                 if full_text and is_relevant_news(source_name, title, clean_desc):
-                                    collected_news.append((source_name, title, full_text, link))
-                                    feed_count += 1
-                                else:
-                                    print(f"🚫 [NOISE FILTER] {source_name}: {title}")
-                            print(f"📥 {source_name} నుండి {feed_count} వార్తలు సేకరించాను.")
-                            success = True
+                                    collected_news.append((publisher, title, full_text, link))
                             break 
                     except Exception as feed_err:
-                        print(f"⚠️ {source_name} ప్రయత్నం {attempt}/3 ఫెయిల్ అయింది: {feed_err}")
-                        if attempt < 3:
-                            time.sleep(2) 
-                        else:
-                            report_error_to_telegram(f"RSS Fetch ({source_name})", str(feed_err))
-                    continue
+                        print(f"⚠️ RSS Fetch warning ({source_name}): {feed_err}")
+                        time.sleep(2)
 
             if not collected_news:
-                print("💤 వార్తలు ఏవీ దొరకలేదు సర్. 5 నిమిషాల గ్యాప్ తీసుకుంటున్నాను...")
                 time.sleep(300)
                 continue
 
             filtered_batch = []
-            batch_seen_titles = []
+            batch_seen_records = []
 
             for source, raw_title, news_text, article_link in collected_news:
+                if is_same_event(
+                    raw_title,
+                    event_id=None,
+                    article_link=article_link,
+                    source=source,
+                    extra_candidates=batch_seen_records,
+                ):
+                    continue
+
                 article_type = detect_article_type(raw_title)
                 news_category = classify_news(raw_title)
-                event_id, impacted_assets, impacted_sectors, impacted_stocks = detect_event_and_impact(raw_title, news_category, article_type)
+                event_id, impacted_assets, impacted_sectors, impacted_stocks = detect_event_and_impact(
+                    raw_title, news_category, article_type
+                )
 
-                if is_same_event(raw_title, event_id):
-                    print(f"🚫 [SKIP DUPLICATE EVENT] {raw_title}")
-                    continue
+                record = {
+                    "title": raw_title,
+                    "event_id": event_id,
+                    "link": article_link,
+                    "source": source,
+                    "story_fingerprint": canonical_story_fingerprint(raw_title),
+                }
 
-                is_batch_duplicate = False
-                for seen_title in batch_seen_titles:
-                    similarity, common, _ = story_similarity(raw_title, seen_title)
-                    new_numbers = extract_numbers(raw_title)
-                    old_numbers = extract_numbers(seen_title)
-                    anchor_overlap = len(extract_anchor_tokens(raw_title) & extract_anchor_tokens(seen_title))
-                    number_overlap = bool(new_numbers and old_numbers and (new_numbers & old_numbers))
-                    number_conflict = bool(
-                        new_numbers and old_numbers and not (new_numbers & old_numbers)
-                    )
+                batch_seen_records.append(record)
+                filtered_batch.append((
+                    source, raw_title, news_text, article_link, article_type,
+                    news_category, event_id, impacted_assets, impacted_sectors, impacted_stocks
+                ))
 
-                    if (
-                        (similarity >= 0.55 and not number_conflict)
-                        or
-                        (anchor_overlap >= 2 and number_overlap and similarity >= 0.38)
-                    ):
-                        is_batch_duplicate = True
-                        print(
-                            f"🚫 [SKIP BATCH SMART DUPLICATE] "
-                            f"score={similarity:.2f} | {raw_title}"
-                        )
-                        break
-
-                if is_batch_duplicate:
-                    continue
-
-                batch_seen_titles.append(raw_title)
-                filtered_batch.append((source, raw_title, news_text, article_link, article_type, news_category, event_id, impacted_assets, impacted_sectors, impacted_stocks))
+            print(
+                f"📊 RSS Batch: {len(collected_news)} collected → "
+                f"{len(filtered_batch)} unique → "
+                f"{len(collected_news) - len(filtered_batch)} duplicates rejected"
+            )
 
             for source, raw_title, news_text, article_link, article_type, news_category, event_id, impacted_assets, impacted_sectors, impacted_stocks in filtered_batch:
-                current_clean_content = clean_main_content(news_text)
+                if not claim_exact_news_in_db(raw_title, article_link, event_id, source):
+                    continue
 
                 SENT_NEWS_MEMORY.append(raw_title)
                 SENT_NEWS_META.append({
-                    'title': raw_title,
-                    'event_id': event_id,
-                    'timestamp': datetime.now(),
-                    'story_fingerprint': canonical_story_fingerprint(raw_title)
+                    "title": raw_title,
+                    "event_id": event_id,
+                    "timestamp": datetime.now(),
+                    "story_fingerprint": canonical_story_fingerprint(raw_title),
+                    "link": article_link,
+                    "source": source,
                 })
-                if len(SENT_NEWS_MEMORY) > 2000:
+
+                if len(SENT_NEWS_MEMORY) > 5000:
                     SENT_NEWS_MEMORY.pop(0)
-                if len(SENT_NEWS_META) > 2000:
+                if len(SENT_NEWS_META) > 5000:
                     SENT_NEWS_META.pop(0)
-
-                # Keep this timestamp only for monitoring/debugging; it is NO LONGER a blanket duplicate block.
-                if event_id != "GENERAL_MARKET_UPDATE":
-                    RECENT_EVENT_IDS[event_id] = time.time()
-
-                # MongoDB exact claim happens immediately before Telegram delivery.
-                # This protects against duplicate sends when two bot processes run together.
-                if not claim_exact_news_in_db(raw_title, article_link, event_id, source):
-                    print(f"🚫 [SKIP MONGO CLAIM DUPLICATE] {raw_title}")
-                    continue
 
                 safe_title = clean_for_html(raw_title)
                 safe_source = clean_for_html(source)
-                
+                  
                 market_score, research_score = calculate_dynamic_scores(
-                    raw_title, 
-                    article_type, 
-                    news_category, 
-                    source, 
-                    event_id, 
-                    debug=True
+                    raw_title, article_type, news_category, source, event_id, debug=True
                 )
-
                 priority = get_priority(market_score, research_score, article_type)
 
                 try:
@@ -887,13 +985,13 @@ def live_research_surveillance_worker():
 
                 unique_id = int(time.time() * 1000)
                 analyze_btn_id = f"ai_analyze_{unique_id}"
-                
+                  
                 analysis_vault[analyze_btn_id] = {
                     "title": safe_title,
                     "telugu_title": safe_telugu_title,
                     "source": safe_source,
                     "full_text": news_text,
-                    "link": article_link, # 🔗 ఒరిజినల్ ఆర్టికల్ లింక్
+                    "link": article_link,
                     "unique_id": unique_id,
                     "event_id": event_id,
                     "article_type": article_type,
@@ -906,37 +1004,37 @@ def live_research_surveillance_worker():
                     "priority": priority
                 }
 
-                # 📩 లింక్ ఉన్న మెసేజ్ ఫార్మాట్
                 short_telegram_msg = f"{priority}\n\n" \
-                                     f"🔑 <b>Event ID:</b> #{event_id}\n" \
-                                     f"📝 <b>Article Type:</b> {article_type}\n" \
-                                     f"🌍 <b>Category:</b> {news_category}\n" \
-                                     f"🎯 <b>Impacted Assets:</b> {impacted_assets}\n" \
-                                     f"🏭 <b>Key Sectors:</b> {impacted_sectors}\n" \
-                                     f"📈 <b>Affected Stocks:</b> {impacted_stocks}\n" \
-                                     f"📊 <b>Market Impact:</b> {market_score}/100 | 📚 <b>Research Value:</b> {research_score}/100\n\n" \
-                                     f"🗞️ <b>శీర్షిక:</b> {safe_title}\n" \
-                                     f"🔄 <b>తెలుగు:</b> {safe_telugu_title}\n\n" \
-                                     f"🌐 <b>మూలం:</b> {safe_source}\n" \
-                                     f"🔗 <b>మూల వార్త:</b> <a href='{article_link}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>"
+                                   f"🔑 <b>Event ID:</b> #{event_id}\n" \
+                                   f"📝 <b>Article Type:</b> {article_type}\n" \
+                                   f"🌍 <b>Category:</b> {news_category}\n" \
+                                   f"🎯 <b>Impacted Assets:</b> {impacted_assets}\n" \
+                                   f"🏭 <b>Key Sectors:</b> {impacted_sectors}\n" \
+                                   f"📈 <b>Affected Stocks:</b> {impacted_stocks}\n" \
+                                   f"📊 <b>Market Impact:</b> {market_score}/100 | 📚 <b>Research Value:</b> {research_score}/100\n\n" \
+                                   f"🗞️ <b>శీర్షిక:</b> {safe_title}\n" \
+                                   f"🔄 <b>తెలుగు:</b> {safe_telugu_title}\n\n" \
+                                   f"🌐 <b>మూలం:</b> {safe_source}\n" \
+                                   f"🔗 <b>మూల వార్త:</b> <a href='{article_link}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>"
 
                 markup = InlineKeyboardMarkup()
                 analyze_btn = InlineKeyboardButton(text="🧠 Analyze with AI", callback_data=analyze_btn_id)
-                # 🌐 ఒరిజినల్ ఆర్టికల్ ని రీడైరెక్ట్ చేసే బటన్
                 link_btn = InlineKeyboardButton(text="🌐 Read Full Article", url=article_link)
                 markup.add(analyze_btn)
                 markup.add(link_btn)
+                  
+                try:
+                    bot.send_message(YOUR_TELEGRAM_CHAT_ID, short_telegram_msg, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
+                except Exception as send_err:
+                    print(f"⚠️ టెలిగ్రామ్ మెసేజ్ పంపడంలో చిన్న వార్నింగ్: {send_err}")
                 
-                bot.send_message(YOUR_TELEGRAM_CHAT_ID, short_telegram_msg, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
-                print(f"📤 [TELEGRAM SENT] [{event_id}] {safe_title}")
                 time.sleep(2)
-                
-            print(f"\n📡📡 నిరంతర నిఘా లూప్ ముగిసింది. మళ్లీ 5 నిమిషాల తర్వాత చెక్ చేస్తుంది సర్...")
-            
+              
         except Exception as e:
-            print(f"⚠️ [LOOP EXCEPTION] Live Research లూప్‌లో అంతరాయం: {e}")
-            report_error_to_telegram("Live Research Main Loop", str(e))
-            
+            print(f"⚠️ [LOOP NETWORK EXCEPTION] కనెక్షన్ తాత్కాలికంగా కట్ అయింది: {e}")
+            time.sleep(10)
+            continue
+              
         time.sleep(300)
 
 # =====================================================================
@@ -944,7 +1042,6 @@ def live_research_surveillance_worker():
 # =====================================================================
 def run_gemini_analysis(news_item):
     if not client:
-        print("❌ జెమిని API కీ సెట్ చేయలేదు సర్.")
         return None
 
     news_text = news_item.get('full_text', '')
@@ -988,29 +1085,26 @@ OUTPUT FORMAT:
         )
         return response.text.strip()
     except Exception as err:
-        print(f"❌ జెమిని API ఎర్రర్ ఇచ్చింది: {err}")
         return None
 
 # =====================================================================
 # 🚀 మాస్టర్ కమాండ్ సెంటర్ & బాట్ ఈవెంట్స్
 # =====================================================================
 if __name__ == "__main__":
-    print("🧹 Render లో Token Conflict రాకుండా పాత కనెక్షన్‌లను క్లియర్ చేస్తున్నాను సర్...")
     try:
         bot.delete_webhook(drop_pending_updates=True)
         time.sleep(2) 
-        print("✅ పాత కనెక్షన్‌లు క్లియర్ అయ్యాయి సర్!")
-    except Exception as token_err:
+    except Exception:
         pass
 
     load_past_news_from_db()
 
-    start_msg = "🤖 <b>Institutional Research Terminal Bot v10.1 సిద్ధంగా ఉంది సర్!</b>\n\n" \
-                "🏆 <b>10/10 Duplicate Engine Upgrade:</b> Direct Article Links Layer యాడ్ చేయబడింది!"
-    
+    start_msg = "🤖 <b>Institutional Research Terminal Bot v10.4 సిద్ధంగా ఉంది సర్!</b>\n\n" \
+                "🏆 <b>Smart 5-Step Deduplication Engine:</b> Active & Running!"
+      
     try: bot.send_message(YOUR_TELEGRAM_CHAT_ID, start_msg, parse_mode="HTML")
     except: pass
-    
+      
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=live_research_surveillance_worker, daemon=True).start()
 
@@ -1027,12 +1121,12 @@ if __name__ == "__main__":
     def callback_listener(call):
         global analysis_vault
         msg_key = call.data
-        
+          
         if msg_key.startswith("ai_analyze_"):
             if msg_key in analysis_vault:
                 vault_item = analysis_vault[msg_key]
                 bot.answer_callback_query(call.id, text="⏳ AI విశ్లేషిస్తోంది... దయచేసి కొన్ని సెకన్లు వేచి ఉండండి...", show_alert=False)
-                
+                  
                 bot.edit_message_text(
                     chat_id=call.message.chat.id,
                     message_id=call.message.message_id,
@@ -1051,35 +1145,35 @@ if __name__ == "__main__":
                     parse_mode="HTML",
                     disable_web_page_preview=True
                 )
-                
+                  
                 agent_output = run_gemini_analysis(vault_item)
-                
+                  
                 if agent_output and "[DEEP_ANALYSIS]" in agent_output:
                     parts = agent_output.split("[DEEP_ANALYSIS]")
                     one_line_part = parts[0].replace("[ONE_LINE]", "").replace("HIGH_IMPACT", "").strip()
                     deep_analysis_part = parts[1].strip()
-                    
+                      
                     deep_analysis_part = re.sub(r'(\n\s*\d+[\.\)]\s*)', r'\n\n\1', deep_analysis_part)
                     deep_analysis_part = re.sub(r'(\n\s*\*+\s*)', r'\n\n\1', deep_analysis_part)
                     deep_analysis_part = re.sub(r'\n{3,}', '\n\n', deep_analysis_part)
-                    
+                      
                     safe_one_line = clean_for_html(one_line_part)
-                    
+                      
                     def split_analysis(text, size=3500):
                         return [text[i:i+size] for i in range(0, len(text), size)]
-                    
+                      
                     report_parts = split_analysis(deep_analysis_part.strip())
                     unique_id = vault_item['unique_id']
-                    
+                      
                     view_id = f"view_{unique_id}"
                     back_id = f"back_{unique_id}"
-                    
+                      
                     short_telegram_msg = f"📢 <b>రీసెర్చ్ టీమ్ లైవ్ అలర్ట్</b>\n\n" \
-                                         f"🔑 <b>Event ID:</b> #{vault_item.get('event_id', 'GENERAL')}\n" \
-                                         f"🗞️ <b>వార్త శీర్షిక:</b> {vault_item['title']}\n" \
-                                         f"🌐 <b>మూలం:</b> {vault_item['source']}\n" \
-                                         f"🔗 <b>మూల వార్త:</b> <a href='{vault_item.get('link', '#')}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>\n" \
-                                         f"💡 <b>క్విక్ వ్యూ:</b> {safe_one_line}"
+                                           f"🔑 <b>Event ID:</b> #{vault_item.get('event_id', 'GENERAL')}\n" \
+                                           f"🗞️ <b>వార్త శీర్షిక:</b> {vault_item['title']}\n" \
+                                           f"🌐 <b>మూలం:</b> {vault_item['source']}\n" \
+                                           f"🔗 <b>మూల వార్త:</b> <a href='{vault_item.get('link', '#')}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>\n" \
+                                           f"💡 <b>క్విక్ వ్యూ:</b> {safe_one_line}"
 
                     analysis_vault[view_id] = {
                         "title": vault_item['title'],
@@ -1096,7 +1190,7 @@ if __name__ == "__main__":
                     link_btn = InlineKeyboardButton(text="🌐 Read Full Article", url=vault_item.get('link', '#'))
                     markup.add(view_btn)
                     markup.add(link_btn)
-                    
+                      
                     bot.edit_message_text(
                         chat_id=call.message.chat.id,
                         message_id=call.message.message_id,
@@ -1109,7 +1203,7 @@ if __name__ == "__main__":
                     markup = InlineKeyboardMarkup()
                     link_btn = InlineKeyboardButton(text="🌐 Read Full Article", url=vault_item.get('link', '#'))
                     markup.add(link_btn)
-                    
+                      
                     bot.edit_message_text(
                         chat_id=call.message.chat.id,
                         message_id=call.message.message_id,
@@ -1131,33 +1225,33 @@ if __name__ == "__main__":
             unique_id = parts_key[1]
             current_page = int(parts_key[2])
             vault_id = f"view_{unique_id}"
-            
+              
             if vault_id in analysis_vault:
                 vault_data = analysis_vault[vault_id]
                 report_parts = vault_data["parts"]
                 total_pages = len(report_parts)
                 page_content = report_parts[current_page]
-                
+                  
                 full_report = f"📊 <b>పూర్తి రీసెర్చ్ నివేదిక (Page {current_page + 1}/{total_pages})</b>\n\n" \
                               f"🗞 <b>వార్త:</b> {vault_data['title']}\n" \
                               f"🌐 <b>మూలం:</b> {vault_data['source']}\n" \
                               f"🔗 <b>మూల వార్త:</b> <a href='{vault_data.get('link', '#')}'>ఇక్కడ క్లిక్ చేసి చదవండి</a>\n" \
                               f"--------------------------------------------------\n\n" \
                               f"{page_content.strip()}"
-                
+                  
                 markup = InlineKeyboardMarkup()
                 row_btns = []
                 if current_page > 0:
                     row_btns.append(InlineKeyboardButton(text="⬅️ Previous", callback_data=f"page_{unique_id}_{current_page - 1}"))
                 if current_page < total_pages - 1:
                     row_btns.append(InlineKeyboardButton(text="➡️ Next", callback_data=f"page_{unique_id}_{current_page + 1}"))
-                
+                  
                 if row_btns:
                     markup.row(*row_btns)
-                
+                  
                 markup.add(InlineKeyboardButton(text="🏠 Back to Alert", callback_data=vault_data['back_key']))
                 markup.add(InlineKeyboardButton(text="🌐 Read Full Article", url=vault_data.get('link', '#')))
-                
+                  
                 bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=full_report, reply_markup=markup, parse_mode="HTML", disable_web_page_preview=True)
 
         elif msg_key.startswith("back_"):
@@ -1166,11 +1260,11 @@ if __name__ == "__main__":
                 if view_key in analysis_vault:
                     vault_data = analysis_vault[view_key]
                     parts_key = view_key.split("_")[1]
-                    
+                      
                     original_markup = InlineKeyboardMarkup()
                     original_markup.add(InlineKeyboardButton(text="🔎 పూర్తి విశ్లేషణ చదవండి (Read Full View)", callback_data=f"page_{parts_key}_0"))
                     original_markup.add(InlineKeyboardButton(text="🌐 Read Full Article", url=vault_data.get('link', '#')))
-                    
+                      
                     bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, text=vault_data['original_text'], reply_markup=original_markup, parse_mode="HTML", disable_web_page_preview=True)
 
     bot.infinity_polling()
